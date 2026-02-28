@@ -69,8 +69,8 @@ def create_session(
 ) -> str:
     """Create a new tmux session inside the container.
 
-    Uses tmux new-session -d, then send-keys so bash is the session
-    process (survives command exit).
+    Uses tmux new-session -d, then send-keys with exec so the command
+    replaces bash — exiting the command kills the tmux session.
     """
     if session_name is None:
         session_name = next_session_name(container)
@@ -96,10 +96,10 @@ def create_session(
 
     lxd.exec_cmd(container, tmux_args, user=CONTAINER_USER, env=env)
 
-    # Send the command via send-keys so bash is the parent process
+    # exec replaces bash with the command — when it exits, the tmux session ends.
     lxd.exec_cmd(
         container,
-        ["tmux", "send-keys", "-t", session_name, command, "Enter"],
+        ["tmux", "send-keys", "-t", session_name, f"exec {command}", "Enter"],
         user=CONTAINER_USER,
     )
 

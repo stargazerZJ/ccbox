@@ -53,6 +53,12 @@ def check_lxd_group() -> None:
         pass
 
 
+def _container_username(container: str) -> str:
+    """Resolve the username for UID 1000 inside the container."""
+    r = lxd.exec_cmd(container, ["id", "-un", "1000"], capture=True, check=False)
+    return r.stdout.strip() if r.returncode == 0 else "ubuntu"
+
+
 def cmd_default(config: Config, args: argparse.Namespace) -> None:
     """Default command: find/create sandbox for CWD, manage sessions."""
     cwd = os.getcwd()
@@ -243,7 +249,14 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
     sandbox_name = resolve_sandbox(config, args.sandbox)
     container = ensure_running(config, sandbox_name)
     cwd = os.getcwd()
-    lxd.exec_interactive(container, ["bash", "-l"], user="1000", cwd=cwd)
+    username = _container_username(container)
+    # su -l gives a full login env (PAM, /etc/environment, profiles).
+    # -w preserves CCBOX_CWD through the login env reset; .bashrc cd's to it.
+    lxd.exec_interactive(
+        container,
+        ["su", "-l", username, "-w", "CCBOX_CWD"],
+        env={"CCBOX_CWD": cwd},
+    )
 
 
 def cmd_config(config: Config, args: argparse.Namespace) -> None:

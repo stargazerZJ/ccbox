@@ -69,6 +69,7 @@ def _bootstrap(container: str, username: str) -> None:
         '\n# ccbox\n'
         'export PATH="$HOME/.local/bin:$PATH"\n'
         'stty -ixon 2>/dev/null || true\n'
+        '[ -n "$CCBOX_CWD" ] && cd "$CCBOX_CWD"\n'
     )
     lxd.exec_cmd(container, ["bash", "-c",
         f"echo {shlex.quote(bashrc_snippet)} >> /home/{username}/.bashrc"])
