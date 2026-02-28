@@ -65,17 +65,34 @@ def remove_mount(config: Config, sandbox_name: str, path: str) -> None:
 
 
 def ensure_uv_shim() -> None:
-    """Write the uv shim to ~/.config/ccbox/bin/uv from project assets."""
+    """Ensure a uv binary exists at ~/.config/ccbox/bin/uv.
+
+    If a patched binary is already deployed, leave it alone.
+    Otherwise, write the legacy Python shim from project assets.
+    """
     SHIM_DIR.mkdir(parents=True, exist_ok=True)
     shim_path = SHIM_DIR / "uv"
+
+    # If a binary already exists (e.g. patched uv), don't overwrite it
+    if shim_path.exists():
+        try:
+            with open(shim_path, "rb") as f:
+                magic = f.read(4)
+            if magic == b"\x7fELF":
+                return  # patched binary, leave it
+        except OSError:
+            pass
 
     # Read shim content from package assets
     asset_ref = importlib.resources.files("ccbox").parent.parent / "assets" / "uv-shim"
     shim_content = asset_ref.read_text()
 
     # Write if changed or missing
-    if shim_path.exists() and shim_path.read_text() == shim_content:
-        return
+    try:
+        if shim_path.exists() and shim_path.read_text() == shim_content:
+            return
+    except (UnicodeDecodeError, OSError):
+        pass
     shim_path.write_text(shim_content)
     shim_path.chmod(shim_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
