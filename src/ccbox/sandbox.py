@@ -96,15 +96,24 @@ def remove_sandbox(config: Config, name: str) -> None:
     entry = config.get_sandbox(name)
     if entry is None:
         raise ValueError(f"Sandbox '{name}' not found")
-    lxd.delete(entry.container, force=True)
+    # Container may already be gone (deleted externally)
+    if lxd.container_exists(entry.container):
+        lxd.delete(entry.container, force=True)
     config.remove_sandbox(name)
 
 
 def list_sandboxes(config: Config) -> list[dict]:
-    """List all sandboxes with their state and session count."""
+    """List all sandboxes with their state and session count.
+
+    Detects state/LXD mismatches (container deleted externally).
+    """
     result = []
+    stale = []
     for name, entry in config.state.sandboxes.items():
         state = lxd.container_state(entry.container)
+        if state == "NotFound":
+            stale.append(name)
+            continue
         sessions = 0
         if state == "Running":
             sessions = len(list_sessions(entry.container))
@@ -115,6 +124,11 @@ def list_sandboxes(config: Config) -> list[dict]:
             "sessions": sessions,
             "mounts": len(entry.mounts),
         })
+    # Clean up stale entries
+    for name in stale:
+        print(f"Warning: sandbox '{name}' container no longer exists. Removing from config.",
+              file=sys.stderr)
+        config.remove_sandbox(name)
     return result
 
 

@@ -32,6 +32,27 @@ from ccbox.session import (
 from ccbox import lxd
 
 
+def check_lxd_group() -> None:
+    """Check if the current user is in the lxd group."""
+    import grp
+    try:
+        lxd_group = grp.getgrnam("lxd")
+        import getpass
+        username = getpass.getuser()
+        if username not in lxd_group.gr_mem:
+            # Also check primary group
+            import pwd
+            pw = pwd.getpwnam(username)
+            if pw.pw_gid != lxd_group.gr_gid:
+                print("Error: Your user is not in the 'lxd' group.", file=sys.stderr)
+                print("Run: sudo usermod -aG lxd $USER", file=sys.stderr)
+                print("Then re-login or run: newgrp lxd", file=sys.stderr)
+                raise SystemExit(1)
+    except KeyError:
+        # lxd group doesn't exist — LXD may not be installed
+        pass
+
+
 def cmd_default(config: Config, args: argparse.Namespace) -> None:
     """Default command: find/create sandbox for CWD, manage sessions."""
     cwd = os.getcwd()
@@ -347,6 +368,9 @@ COMMAND_MAP = {
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    check_lxd_group()
+
     config = Config()
 
     handler = COMMAND_MAP.get(args.command)

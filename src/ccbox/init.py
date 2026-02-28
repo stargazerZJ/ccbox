@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.resources
 import sys
-import tempfile
 
 from ccbox import lxd
 from ccbox.mount import add_auto_mounts
