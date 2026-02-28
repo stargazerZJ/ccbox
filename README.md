@@ -2,6 +2,17 @@
 
 Sandboxed Claude Code and Codex CLI sessions in LXD containers. Run `claude --dangerously-skip-permissions` or `codex --yolo` safely by isolating them inside a container with identity-mapped mounts.
 
+## Why ccbox
+
+The sandbox that doesn't make you start over every time.
+
+- **Shared session state** — Host and container share the same `~/.claude` and `~/.local/share/claude` via rw bind mounts. Start a Claude session on the host, resume it inside the sandbox (and vice versa) with no export/import step.
+- **Persistent full environment** — LXD images backed by ZFS. Install Rust, Go, build tools once, publish the image, reuse across all sandboxes. No re-setup per session.
+- **Flexible mounts** — Add any host directory as a read-only or read-write mount. Multiple projects can share a single sandbox, and you can mount reference repos, datasets, or config dirs alongside your working tree.
+- **uv hardlink deferral** — A patched uv binary delegates cross-mount hardlinks to a host-side Unix socket server, preserving the shared cache performance that other sandboxing tools lose (most fall back to `UV_LINK_MODE=copy`).
+- **Identity-mapped mounts** — LXD `raw.idmap` maps host UID to container UID 1:1. No UID translation, no `chown` storms, no broken file permissions. Hardlinks, venvs, and git repos just work.
+- **Container creation is slow** — Admittedly, spinning up a new LXD container takes a few seconds. Subsequent sessions reuse the existing container and attach instantly.
+
 ## How it works
 
 ```
