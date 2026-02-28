@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import importlib.resources
 import os
 import re
+import stat
 
 from ccbox import lxd
-from ccbox.config import Config, MountEntry
+from ccbox.config import Config, MountEntry, SHIM_DIR
 
 
 def device_name_from_path(path: str) -> str:
@@ -17,12 +19,6 @@ def device_name_from_path(path: str) -> str:
     clean = path.strip("/")
     clean = re.sub(r"[^a-zA-Z0-9_.-]", "-", clean)
     return f"mount-{clean}"
-
-
-def _ensure_path_exists(path: str) -> None:
-    """Create directory if it doesn't exist. Skip for files."""
-    if not os.path.exists(path):
-        os.makedirs(path, exist_ok=True)
 
 
 def add_mount(
@@ -43,13 +39,10 @@ def add_mount(
     mode = "ro" if readonly else "rw"
     dev_name = device_name_from_path(resolved)
 
-    # Add LXD disk device (identity-mapped: host path = container path)
     lxd.add_disk_device(
         entry.container, dev_name, resolved, resolved, readonly=readonly,
     )
 
-    # Update config
-    # Remove existing mount for same path if any
     entry.mounts = [m for m in entry.mounts if os.path.realpath(m.path) != resolved]
     entry.mounts.append(MountEntry(path=resolved, mode=mode))
     config.set_sandbox(sandbox_name, entry)
@@ -70,6 +63,22 @@ def remove_mount(config: Config, sandbox_name: str, path: str) -> None:
     config.set_sandbox(sandbox_name, entry)
 
 
+def ensure_uv_shim() -> None:
+    """Write the uv shim to ~/.config/ccbox/bin/uv from project assets."""
+    SHIM_DIR.mkdir(parents=True, exist_ok=True)
+    shim_path = SHIM_DIR / "uv"
+
+    # Read shim content from package assets
+    asset_ref = importlib.resources.files("ccbox").parent.parent / "assets" / "uv-shim"
+    shim_content = asset_ref.read_text()
+
+    # Write if changed or missing
+    if shim_path.exists() and shim_path.read_text() == shim_content:
+        return
+    shim_path.write_text(shim_content)
+    shim_path.chmod(shim_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
 def add_auto_mounts(container: str, config: Config | None = None) -> None:
     """Add auto-mounts to a container. Reads from config if provided."""
     if config is not None:
@@ -79,11 +88,15 @@ def add_auto_mounts(container: str, config: Config | None = None) -> None:
         mounts = _default_auto_mounts()
 
     for m in mounts:
-        resolved = os.path.realpath(m.path)
-        # Create directory stubs for dirs that don't exist yet
-        if not os.path.exists(resolved):
-            os.makedirs(resolved, exist_ok=True)
-        dev_name = device_name_from_path(resolved)
+        source = os.path.realpath(m.path)
+        target = m.target if m.target is not None else source
+
+        # Create source stubs if they don't exist
+        if not os.path.exists(source):
+            # For paths ending without extension, assume directory
+            os.makedirs(source, exist_ok=True)
+
+        dev_name = device_name_from_path(target)
         lxd.add_disk_device(
-            container, dev_name, resolved, resolved, readonly=(m.mode == "ro"),
+            container, dev_name, source, target, readonly=(m.mode == "ro"),
         )

@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""ccbox uv shim — runs uv on the host via Unix socket.
+
+Connects to the ccbox uv server, sends args/cwd/env, streams
+stdout/stderr back. uv runs on the host so hardlinks from the
+shared cache to .venv work natively.
+"""
+import json
+import os
+import socket
+import struct
+import sys
+
+SOCK_PATH = os.path.expanduser("~/.config/ccbox/run/uv.sock")
+
+def main():
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(SOCK_PATH)
+    except FileNotFoundError:
+        print("ccbox: uv server socket not found", file=sys.stderr)
+        sys.exit(1)
+    except ConnectionRefusedError:
+        print("ccbox: uv server not running", file=sys.stderr)
+        sys.exit(1)
+
+    # Send request
+    req = json.dumps({
+        "args": sys.argv[1:],
+        "cwd": os.getcwd(),
+        "env": {k: v for k, v in os.environ.items()
+                if k.startswith("UV_") or k == "VIRTUAL_ENV"},
+    })
+    sock.sendall(req.encode() + b"\n")
+
+    # Read framed response
+    exit_code = 1
+    try:
+        while True:
+            header = b""
+            while len(header) < 5:
+                chunk = sock.recv(5 - len(header))
+                if not chunk:
+                    break
+                header += chunk
+            if len(header) < 5:
+                break
+
+            tag, length = struct.unpack("!BI", header)
+
+            if tag == 0:  # exit code
+                exit_code = length
+                break
+
+            # Read payload
+            data = b""
+            while len(data) < length:
+                chunk = sock.recv(min(length - len(data), 65536))
+                if not chunk:
+                    break
+                data += chunk
+
+            if tag == 1:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            elif tag == 2:
+                sys.stderr.buffer.write(data)
+                sys.stderr.buffer.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        sock.close()
+
+    sys.exit(exit_code)
+
+if __name__ == "__main__":
+    main()

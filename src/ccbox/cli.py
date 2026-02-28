@@ -290,7 +290,10 @@ def cmd_config(config: Config, args: argparse.Namespace) -> None:
                 print("No auto-mounts configured.")
             else:
                 for m in mounts:
-                    print(f"  {m.path} ({m.mode})")
+                    if m.target and m.target != m.path:
+                        print(f"  {m.path} -> {m.target} ({m.mode})")
+                    else:
+                        print(f"  {m.path} ({m.mode})")
         elif args.mounts_action == "reset":
             config._state.auto_mounts = None
             config.save()

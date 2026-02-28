@@ -73,15 +73,22 @@ Also run: `lxc exec ccbox-init-temp -- locale-gen en_US.UTF-8`
 ### 10. Mount claude + test
 Read auto-mounts from `~/.config/ccbox/state.json` field `"auto_mounts"`. If not set, use defaults:
 - `~/.claude` (rw)
-- `~/.local/bin` (ro)
-- `~/.local/share/claude` (ro)
-- `~/.cache/uv` (ro)
+- `~/.local/bin/claude` (ro) — claude symlink/binary
+- `~/.local/share/claude` (ro) — claude installation
+- `~/.cache/uv` (rw) — shared uv cache
+- `~/.config/ccbox/bin/uv` -> `~/.local/bin/uv` (ro) — uv shim (calls host uv via socket)
+- `~/.config/ccbox/run` (rw) — contains the Unix socket for host↔container uv communication
 
-The user may have added custom auto-mounts (e.g. `~/.vim`, `~/.oh-my-zsh`) via `ccbox config mounts add`. Read the config and add ALL of them:
+The user may have added custom auto-mounts (e.g. `~/.vim`, `~/.oh-my-zsh`) via `ccbox config mounts add`. Read the config and add ALL of them.
+
+For each mount, if it has a `"target"` field, use `source=<path> path=<target>`. Otherwise identity-map: `source=<path> path=<path>`.
 ```
-lxc config device add ccbox-init-temp <device-name> disk source=<path> path=<path> [readonly=true]
+lxc config device add ccbox-init-temp <device-name> disk source=<path> path=<target> [readonly=true]
 ```
-Device name: sanitize the path — replace `/` with `-`, prefix with `mount-`.
+Device name: sanitize the **target** path — replace `/` with `-`, prefix with `mount-`.
+
+**Important**: Before adding mounts, ensure the uv shim exists by checking `~/.config/ccbox/bin/uv`. If it doesn't exist, copy it from `assets/uv-shim` in this project.
+
 Restart and test:
 ```
 lxc stop ccbox-init-temp && lxc start ccbox-init-temp
