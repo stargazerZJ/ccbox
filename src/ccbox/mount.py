@@ -203,6 +203,8 @@ def add_auto_mounts(container: str, config: Config | None = None) -> None:
 
         # Create source stubs if they don't exist
         if not os.path.exists(source):
+            if m.optional:
+                continue  # skip optional mounts that don't exist on host
             # Paths with an extension are likely files; others are directories
             if os.path.splitext(source)[1]:
                 os.makedirs(os.path.dirname(source), exist_ok=True)

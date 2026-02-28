@@ -16,16 +16,20 @@ class MountEntry:
     path: str            # source path on host
     mode: str            # "rw" or "ro"
     target: str | None = None  # target path in container (None = same as path)
+    optional: bool = False     # if True, skip when source doesn't exist
 
     def to_dict(self) -> dict:
         d: dict = {"path": self.path, "mode": self.mode}
         if self.target is not None:
             d["target"] = self.target
+        if self.optional:
+            d["optional"] = True
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> MountEntry:
-        return cls(path=d["path"], mode=d["mode"], target=d.get("target"))
+        return cls(path=d["path"], mode=d["mode"], target=d.get("target"),
+                   optional=d.get("optional", False))
 
 
 @dataclass
@@ -70,9 +74,9 @@ def _default_auto_mounts() -> list[MountEntry]:
                    target=f"{home}/.local/bin/uv"),
         # Socket directory for host↔container uv channel
         MountEntry(path=str(RUN_DIR), mode="rw"),
-        # Codex CLI (via nvm)
-        MountEntry(path=f"{home}/.nvm", mode="ro"),
-        MountEntry(path=f"{home}/.codex", mode="rw"),
+        # Codex CLI (via nvm) — optional, only if nvm is installed
+        MountEntry(path=f"{home}/.nvm", mode="ro", optional=True),
+        MountEntry(path=f"{home}/.codex", mode="rw", optional=True),
         # ccbox profile script (sourced by .bashrc)
         MountEntry(path=f"{home}/.config/ccbox/profile.sh", mode="ro"),
     ]

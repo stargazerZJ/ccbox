@@ -151,11 +151,16 @@ def build_claude_command(extra_args: list[str] | None = None) -> str:
     return shlex.join(parts)
 
 
-def _find_nvm_codex() -> str | None:
-    """Find the codex binary under ~/.nvm."""
+def _find_codex() -> str | None:
+    """Find the codex binary — check nvm, then PATH."""
     import glob
+    import shutil
+    # Prefer nvm-installed codex (we know the node version to pair with)
     matches = glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/codex"))
-    return matches[0] if matches else None
+    if matches:
+        return matches[0]
+    # Fall back to whatever's on PATH
+    return shutil.which("codex")
 
 
 def build_codex_command(extra_args: list[str] | None = None) -> str:
@@ -164,9 +169,11 @@ def build_codex_command(extra_args: list[str] | None = None) -> str:
     Uses the full path to the nvm-installed codex and prepends its
     bin dir to PATH so the matching node version is found.
     """
-    codex_path = _find_nvm_codex()
+    codex_path = _find_codex()
     if codex_path:
-        nvm_bin = os.path.dirname(codex_path)
+        codex_dir = os.path.dirname(codex_path)
+        # Only prepend to PATH if it's an nvm path (needs paired node)
+        nvm_bin = codex_dir if "/.nvm/" in codex_path else None
         parts = [codex_path, "--yolo"]
     else:
         nvm_bin = None
