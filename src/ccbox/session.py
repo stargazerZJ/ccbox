@@ -82,6 +82,11 @@ def create_session(
     from pathlib import Path
     env.setdefault("HOME", str(Path.home()))
 
+    # Login identity vars — tools like git and claude expect these
+    import getpass
+    env.setdefault("USER", getpass.getuser())
+    env.setdefault("LOGNAME", env["USER"])
+
     # Keep Claude's mutable config under ~/.claude (rw mount), not ~/.claude.json.
     env.setdefault("CLAUDE_CONFIG_DIR", f"{env['HOME']}/.claude")
 
