@@ -40,15 +40,14 @@ lxc exec ccbox-init-temp -- groupmod -n <username> ubuntu
 lxc exec ccbox-init-temp -- bash -c "echo '<username> ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/<username> && chmod 0440 /etc/sudoers.d/<username>"
 ```
 
-### 6. Mount-point stubs + PATH + stty
+### 6. Mount-point stubs + profile source
 Create directories that will be used as mount points:
 ```
-lxc exec ccbox-init-temp -- su -l <username> -c "mkdir -p ~/.local/bin ~/.local/share/claude ~/.cache/uv ~/.claude"
+lxc exec ccbox-init-temp -- su -l <username> -c "mkdir -p ~/.local/bin ~/.local/share/claude ~/.cache/uv ~/.claude ~/.config/ccbox"
 ```
 Append to `.bashrc`:
 ```
-export PATH="$HOME/.local/bin:$PATH"
-stty -ixon 2>/dev/null || true
+[ -f ~/.config/ccbox/profile.sh ] && . ~/.config/ccbox/profile.sh
 ```
 
 ### 7. Push tmux.conf
@@ -123,7 +122,7 @@ lxc config device remove ccbox-init-temp <device-name>
 ```
 Then publish:
 ```
-lxc publish ccbox-init-temp --alias=ccbox-base [--force if rebuilding]
+lxc publish ccbox-init-temp --alias=ccbox-base [--reuse if rebuilding]
 lxc delete ccbox-init-temp
 ```
 
@@ -132,4 +131,4 @@ Print: **"Base image `ccbox-base` created. You can now use `ccbox` to create san
 ## Important
 - If anything fails, show the error and ask the user how to proceed — do not silently continue.
 - If the user provides extra instructions (apt mirrors, additional packages, config changes), incorporate them at the appropriate step.
-- The `--force` flag on publish is needed if `ccbox-base` already exists.
+- The `--reuse` flag on publish is needed if `ccbox-base` already exists.

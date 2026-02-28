@@ -73,6 +73,8 @@ def _default_auto_mounts() -> list[MountEntry]:
         # Codex CLI (via nvm)
         MountEntry(path=f"{home}/.nvm", mode="ro"),
         MountEntry(path=f"{home}/.codex", mode="rw"),
+        # ccbox profile script (sourced by .bashrc)
+        MountEntry(path=f"{home}/.config/ccbox/profile.sh", mode="ro"),
     ]
 
 

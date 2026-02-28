@@ -98,6 +98,27 @@ def ensure_uv_shim() -> None:
     shim_path.chmod(shim_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def ensure_profile_script() -> None:
+    """Deploy assets/ccbox-profile.sh to ~/.config/ccbox/profile.sh.
+
+    Copies on every sandbox start so edits to the asset propagate automatically.
+    """
+    from ccbox.config import STATE_DIR
+
+    dest = STATE_DIR / "profile.sh"
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    asset_ref = importlib.resources.files("ccbox").parent.parent / "assets" / "ccbox-profile.sh"
+    content = asset_ref.read_text()
+
+    try:
+        if dest.exists() and dest.read_text() == content:
+            return
+    except (UnicodeDecodeError, OSError):
+        pass
+    dest.write_text(content)
+
+
 def _normalize_mount(m: MountEntry) -> MountEntry | None:
     """Normalize legacy/problematic mount entries before applying to LXD."""
     home = os.path.expanduser("~")
@@ -182,8 +203,12 @@ def add_auto_mounts(container: str, config: Config | None = None) -> None:
 
         # Create source stubs if they don't exist
         if not os.path.exists(source):
-            # For paths ending without extension, assume directory
-            os.makedirs(source, exist_ok=True)
+            # Paths with an extension are likely files; others are directories
+            if os.path.splitext(source)[1]:
+                os.makedirs(os.path.dirname(source), exist_ok=True)
+                open(source, "a").close()
+            else:
+                os.makedirs(source, exist_ok=True)
 
         dev_name = device_name_from_path(target)
         lxd.add_disk_device(

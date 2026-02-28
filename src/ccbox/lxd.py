@@ -149,7 +149,7 @@ def push_file(
 def publish(container: str, alias: str, force: bool = False) -> None:
     args = ["publish", container, f"--alias={alias}"]
     if force:
-        args.append("--force")
+        args.append("--reuse")
     run_lxc(*args)
 
 

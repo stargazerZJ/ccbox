@@ -9,7 +9,7 @@ import importlib.resources
 
 from ccbox import lxd
 from ccbox.config import Config, SandboxEntry
-from ccbox.mount import add_auto_mounts, add_mount, ensure_uv_shim, fix_mount_parents
+from ccbox.mount import add_auto_mounts, add_mount, ensure_uv_shim, ensure_profile_script, fix_mount_parents
 from ccbox.session import list_sessions
 from ccbox.uv_server import ensure_server_running
 
@@ -63,8 +63,9 @@ def create_sandbox(
         print("Base image not found. Run 'ccbox init' first.", file=sys.stderr)
         raise SystemExit(1)
 
-    # Ensure uv shim and server are ready before creating container
+    # Ensure uv shim, profile script, and server are ready before creating container
     ensure_uv_shim()
+    ensure_profile_script()
     ensure_server_running()
 
     # Init container from base image (don't start yet — configure first)
@@ -110,6 +111,7 @@ def ensure_running(config: Config, name: str) -> str:
         raise ValueError(f"Container for sandbox '{name}' no longer exists. Removed from config.")
     if state == "Stopped":
         ensure_uv_shim()
+        ensure_profile_script()
         ensure_server_running()
         lxd.start(entry.container)
     return entry.container

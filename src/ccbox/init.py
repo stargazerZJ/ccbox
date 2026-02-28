@@ -9,7 +9,7 @@ import shlex
 import sys
 
 from ccbox import lxd
-from ccbox.mount import add_auto_mounts
+from ccbox.mount import add_auto_mounts, ensure_profile_script
 
 TEMP_CONTAINER = "ccbox-init-temp"
 BASE_IMAGE = "ccbox-base"
@@ -59,17 +59,15 @@ def _bootstrap(container: str, username: str) -> None:
         f"&& chmod 0440 /etc/sudoers.d/{username}"])
 
     # Create mount-point stubs
-    dirs = [".local/bin", ".local/share/claude", ".cache/uv", ".claude"]
+    dirs = [".local/bin", ".local/share/claude", ".cache/uv", ".claude", ".config/ccbox"]
     for d in dirs:
         lxd.exec_cmd(container, ["mkdir", "-p", f"/home/{username}/{d}"])
     lxd.exec_cmd(container, ["chown", "-R", f"{username}:{username}", f"/home/{username}"])
 
-    # PATH + disable XON/XOFF (for Ctrl+Q tmux detach)
+    # PATH + shell init: source the mounted profile script
     bashrc_snippet = (
         '\n# ccbox\n'
-        'export PATH="$HOME/.local/bin:$PATH"\n'
-        'stty -ixon 2>/dev/null || true\n'
-        '[ -n "$CCBOX_CWD" ] && cd "$CCBOX_CWD"\n'
+        '[ -f ~/.config/ccbox/profile.sh ] && . ~/.config/ccbox/profile.sh\n'
     )
     lxd.exec_cmd(container, ["bash", "-c",
         f"echo {shlex.quote(bashrc_snippet)} >> /home/{username}/.bashrc"])
@@ -124,6 +122,7 @@ def run_init(force: bool = False, storage_pool: str | None = None) -> None:
         # --- Restart to apply idmap, then add mounts ---
         print("Restarting to apply UID mapping...")
         lxd.stop(TEMP_CONTAINER)
+        ensure_profile_script()
         add_auto_mounts(TEMP_CONTAINER)
         lxd.start(TEMP_CONTAINER)
 
