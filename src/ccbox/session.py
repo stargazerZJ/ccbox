@@ -82,6 +82,9 @@ def create_session(
     from pathlib import Path
     env.setdefault("HOME", str(Path.home()))
 
+    # Keep Claude's mutable config under ~/.claude (rw mount), not ~/.claude.json.
+    env.setdefault("CLAUDE_CONFIG_DIR", f"{env['HOME']}/.claude")
+
     # Always set UV_HARDLINK_SOCKET so patched uv defers hardlinks to host
     from ccbox.config import UV_SOCK
     env.setdefault("UV_HARDLINK_SOCKET", str(UV_SOCK))

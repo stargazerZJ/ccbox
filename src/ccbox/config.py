@@ -57,7 +57,8 @@ def _default_auto_mounts() -> list[MountEntry]:
     return [
         # Claude tooling
         MountEntry(path=f"{home}/.claude", mode="rw"),
-        MountEntry(path=f"{home}/.local/bin/claude", mode="ro"),
+        # Mount the whole bin dir so claude stays a symlink in the container.
+        MountEntry(path=f"{home}/.local/bin", mode="ro"),
         MountEntry(path=f"{home}/.local/share/claude", mode="ro"),
         MountEntry(path=f"{home}/.local/share/claude/versions", mode="rw"),
         # uv: cache, managed pythons, config
@@ -111,6 +112,9 @@ class State:
 class Config:
     def __init__(self) -> None:
         self._state = self._load()
+        # One-time migration for legacy mount layouts.
+        if self._migrate_legacy_auto_mounts():
+            self.save()
 
     @property
     def state(self) -> State:
@@ -121,6 +125,51 @@ class Config:
             return State()
         with open(STATE_FILE) as f:
             return State.from_dict(json.load(f))
+
+    def _migrate_legacy_auto_mounts(self) -> bool:
+        """Migrate legacy auto-mount entries to safer defaults."""
+        mounts = self._state.auto_mounts
+        if mounts is None:
+            return False
+
+        home = str(Path.home())
+        claude_link = f"{home}/.local/bin/claude"
+        claude_bin_dir = f"{home}/.local/bin"
+        claude_json = f"{home}/.claude.json"
+        claude_link_real = os.path.realpath(claude_link)
+        claude_json_real = os.path.realpath(claude_json)
+
+        changed = False
+        rewritten: list[MountEntry] = []
+
+        for m in mounts:
+            mount_real = os.path.realpath(m.path)
+
+            # File-mounting .claude.json breaks atomic replace writes.
+            if m.target is None and (m.path == claude_json or mount_real == claude_json_real):
+                changed = True
+                continue
+
+            # Legacy claude file mount flattened the symlink inside containers.
+            if m.target is None and (m.path == claude_link or mount_real == claude_link_real):
+                rewritten.append(MountEntry(path=claude_bin_dir, mode=m.mode))
+                changed = True
+                continue
+
+            rewritten.append(m)
+
+        # Keep only one entry per source+target pair.
+        deduped: dict[tuple[str, str | None], MountEntry] = {}
+        for m in rewritten:
+            key = (os.path.realpath(m.path), m.target)
+            deduped[key] = m
+        deduped_mounts = list(deduped.values())
+        if len(deduped_mounts) != len(rewritten):
+            changed = True
+
+        if changed:
+            self._state.auto_mounts = deduped_mounts
+        return changed
 
     def save(self) -> None:
         """Atomic save: write to tmp file then rename."""

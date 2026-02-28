@@ -12,6 +12,8 @@ Ctrl+Q             # detach from session (reattach on next ccbox run)
 
 ccbox creates an LXD container, bind-mounts your project directory (rw) and tooling paths, then drops you into a tmux session running Claude Code with `--dangerously-skip-permissions`.
 
+It also sets `CLAUDE_CONFIG_DIR=~/.claude` inside the container, so Claude writes mutable config under the mounted `~/.claude` directory instead of `~/.claude.json`.
+
 ### uv hardlink deferral
 
 Python package managers like uv use hardlinks from a shared cache to `.venv` for fast installs. Inside a container, the cache and project live on different mount points, so hardlinks fail.
@@ -66,7 +68,7 @@ These host paths are bind-mounted into every sandbox:
 | Path | Mode | Purpose |
 |------|------|---------|
 | `~/.claude` | rw | Claude config and project memory |
-| `~/.local/bin/claude` | ro | Claude binary |
+| `~/.local/bin` | ro | Claude launcher symlink and helper binaries |
 | `~/.local/share/claude` | ro | Claude data |
 | `~/.local/share/claude/versions` | rw | Claude version management |
 | `~/.cache/uv` | rw | uv package cache |

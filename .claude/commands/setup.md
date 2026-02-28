@@ -73,7 +73,7 @@ Also run: `lxc exec ccbox-init-temp -- locale-gen en_US.UTF-8`
 ### 10. Mount claude + test
 Read auto-mounts from `~/.config/ccbox/state.json` field `"auto_mounts"`. If not set, use defaults:
 - `~/.claude` (rw)
-- `~/.local/bin/claude` (ro) — claude symlink/binary
+- `~/.local/bin` (ro) — claude symlink/binary
 - `~/.local/share/claude` (ro) — claude installation
 - `~/.cache/uv` (rw) — shared uv cache
 - `~/.config/ccbox/bin/uv` -> `~/.local/bin/uv` (ro) — uv shim (calls host uv via socket)

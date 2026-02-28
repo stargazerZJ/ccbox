@@ -6,6 +6,7 @@ import importlib.resources
 import os
 import re
 import stat
+import sys
 
 from ccbox import lxd
 from ccbox.config import Config, MountEntry, SHIM_DIR
@@ -97,6 +98,33 @@ def ensure_uv_shim() -> None:
     shim_path.chmod(shim_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _normalize_mount(m: MountEntry) -> MountEntry | None:
+    """Normalize legacy/problematic mount entries before applying to LXD."""
+    home = os.path.expanduser("~")
+    claude_link = f"{home}/.local/bin/claude"
+    claude_json = f"{home}/.claude.json"
+    mount_real = os.path.realpath(m.path)
+
+    # .claude.json is rewritten atomically by claude; file mounts break rename().
+    if m.target is None and (
+        m.path == claude_json or mount_real == os.path.realpath(claude_json)
+    ):
+        print(
+            "Warning: skipping auto-mount for ~/.claude.json; "
+            "file mounts block atomic writes and can hang Claude startup.",
+            file=sys.stderr,
+        )
+        return None
+
+    # Preserve claude symlink semantics by mounting ~/.local/bin instead.
+    if m.target is None and (
+        m.path == claude_link or mount_real == os.path.realpath(claude_link)
+    ):
+        return MountEntry(path=f"{home}/.local/bin", mode=m.mode)
+
+    return m
+
+
 def fix_mount_parents(container: str, config: Config | None = None) -> None:
     """Fix ownership of parent directories created by LXD for mount points.
 
@@ -139,11 +167,18 @@ def add_auto_mounts(container: str, config: Config | None = None) -> None:
         from ccbox.config import _default_auto_mounts
         mounts = _default_auto_mounts()
 
-    for m in mounts:
+    seen_targets: set[str] = set()
+    for raw in mounts:
+        m = _normalize_mount(raw)
+        if m is None:
+            continue
         source = os.path.realpath(m.path)
         # Use original path as container target (not resolved) so symlinks
         # like ~/.local/bin/claude appear at the right path inside container.
         target = m.target if m.target is not None else m.path
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
 
         # Create source stubs if they don't exist
         if not os.path.exists(source):
