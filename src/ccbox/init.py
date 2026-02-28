@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import getpass
 import importlib.resources
+import os
+import shlex
 import sys
 
 from ccbox import lxd
@@ -11,7 +14,6 @@ from ccbox.mount import add_auto_mounts
 TEMP_CONTAINER = "ccbox-init-temp"
 BASE_IMAGE = "ccbox-base"
 BASE_OS_IMAGE = "ubuntu:24.04"
-CONTAINER_USER = "1000"
 IDMAP_VALUE = "both 1000 1000"
 
 
@@ -32,14 +34,54 @@ def check_prerequisites() -> None:
         raise SystemExit(1)
 
 
-def run_init(force: bool = False, storage_pool: str | None = None) -> None:
-    """Create the ccbox-base image.
+def _bootstrap(container: str, username: str) -> None:
+    """Minimal inline bootstrap: rename ubuntu user, configure sudo and PATH.
 
-    1. Launch temp container from ubuntu:24.04
-    2. Push and run setup script
-    3. Push tmux.conf
-    4. Drop into shell for manual package installs
-    5. On exit: stop, publish as ccbox-base, delete temp
+    Ubuntu 24.04 ships with user 'ubuntu' at UID 1000. We rename it to
+    match the host user so identity-mapped mounts work seamlessly.
+    """
+    # Rename ubuntu -> username (user may already match)
+    r = lxd.exec_cmd(container, ["id", "-un", "1000"], capture=True, check=False)
+    existing = r.stdout.strip() if r.returncode == 0 else ""
+
+    if existing and existing != username:
+        # Kill any processes owned by the user before renaming
+        lxd.exec_cmd(container, ["pkill", "-u", existing], check=False, capture=True)
+        lxd.exec_cmd(container, ["usermod", "-l", username, "-d", f"/home/{username}",
+                                  "-m", existing])
+        lxd.exec_cmd(container, ["groupmod", "-n", username, existing])
+    elif not existing:
+        lxd.exec_cmd(container, ["useradd", "-m", "-s", "/bin/bash", username])
+
+    # NOPASSWD sudo
+    lxd.exec_cmd(container, ["bash", "-c",
+        f"echo '{username} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/{username} "
+        f"&& chmod 0440 /etc/sudoers.d/{username}"])
+
+    # Create mount-point stubs
+    dirs = [".local/bin", ".local/share/claude", ".cache/uv", ".claude"]
+    for d in dirs:
+        lxd.exec_cmd(container, ["mkdir", "-p", f"/home/{username}/{d}"])
+    lxd.exec_cmd(container, ["chown", "-R", f"{username}:{username}", f"/home/{username}"])
+
+    # PATH + disable XON/XOFF (for Ctrl+Q tmux detach)
+    bashrc_snippet = (
+        '\n# ccbox\n'
+        'export PATH="$HOME/.local/bin:$PATH"\n'
+        'stty -ixon 2>/dev/null || true\n'
+    )
+    lxd.exec_cmd(container, ["bash", "-c",
+        f"echo {shlex.quote(bashrc_snippet)} >> /home/{username}/.bashrc"])
+
+
+def run_init(force: bool = False, storage_pool: str | None = None) -> None:
+    """Create the ccbox-base image interactively.
+
+    1. Launch temp container, minimal bootstrap (rename user, sudo, PATH)
+    2. Mount claude binary, push tmux.conf
+    3. Ask user for instructions, run Claude inside to do the setup
+    4. Drop into shell for manual tweaks
+    5. Publish as ccbox-base
     """
     check_prerequisites()
 
@@ -47,82 +89,118 @@ def run_init(force: bool = False, storage_pool: str | None = None) -> None:
         print(f"Base image '{BASE_IMAGE}' already exists. Use 'ccbox init --force' to rebuild.")
         return
 
+    username = getpass.getuser()
+    container_user = "1000"
+
     # Clean up any leftover temp container
     if lxd.container_exists(TEMP_CONTAINER):
         print(f"Cleaning up leftover '{TEMP_CONTAINER}'...")
         lxd.delete(TEMP_CONTAINER, force=True)
 
     try:
+        # --- Launch ---
         print(f"Creating temporary container from {BASE_OS_IMAGE}...")
         launch_args = ["launch", BASE_OS_IMAGE, TEMP_CONTAINER]
         if storage_pool:
             launch_args += ["-s", storage_pool]
         lxd.run_lxc(*launch_args)
 
-        # Wait for container to be ready
-        print("Waiting for container to start...")
-        lxd.exec_cmd(TEMP_CONTAINER, ["cloud-init", "status", "--wait"], check=False, capture=True)
+        print("Waiting for container to be ready...")
+        lxd.exec_cmd(TEMP_CONTAINER, ["cloud-init", "status", "--wait"],
+                      check=False, capture=True)
 
-        # Set UID mapping
+        # --- UID mapping ---
         lxd.set_config(TEMP_CONTAINER, "raw.idmap", IDMAP_VALUE)
 
-        # Push and run setup script
-        setup_script = _asset_path("setup-base.sh")
-        print("Running setup script...")
-        lxd.push_file(TEMP_CONTAINER, setup_script, "/tmp/setup-base.sh", mode="0755")
-        lxd.exec_cmd(TEMP_CONTAINER, ["bash", "/tmp/setup-base.sh"])
+        # --- Minimal bootstrap ---
+        print(f"Bootstrapping (renaming default user to '{username}')...")
+        _bootstrap(TEMP_CONTAINER, username)
 
-        # Push tmux.conf
+        # --- tmux.conf ---
         tmux_conf = _asset_path("tmux.conf")
         lxd.push_file(TEMP_CONTAINER, tmux_conf, "/etc/tmux.conf", mode="0644")
 
-        # Restart to apply idmap
-        print("Restarting container to apply UID mapping...")
+        # --- Restart to apply idmap, then add mounts ---
+        print("Restarting to apply UID mapping...")
         lxd.stop(TEMP_CONTAINER)
-        lxd.start(TEMP_CONTAINER)
-
-        # Add auto-mounts so we can test claude
         add_auto_mounts(TEMP_CONTAINER)
-
-        # Restart again for mounts to take effect
-        lxd.stop(TEMP_CONTAINER)
         lxd.start(TEMP_CONTAINER)
 
-        # Try running claude --version to trigger Node.js install
+        # --- Test claude ---
         print("Testing claude binary...")
         r = lxd.exec_cmd(
             TEMP_CONTAINER,
             ["bash", "-lc", "claude --version"],
-            user=CONTAINER_USER,
+            user=container_user,
             capture=True,
             check=False,
         )
         if r.returncode == 0:
-            print(f"Claude version: {r.stdout.strip()}")
+            print(f"Claude: {r.stdout.strip()}")
         else:
-            print("Warning: claude --version failed. You may need to install it manually.")
+            print("Warning: claude not found. You can install it in the shell later.")
 
-        # Drop into interactive shell
-        print("\n" + "=" * 60)
-        print("Install any additional packages you need, then exit the shell.")
+        # --- Collect user instructions for inner Claude ---
+        print()
+        print("=" * 60)
+        print("What should Claude install/configure in the base image?")
+        print("Examples:")
+        print("  - install tmux git curl build-essential python3")
+        print("  - set apt source to mirrors.tuna.tsinghua.edu.cn first")
+        print("  - install rust toolchain")
+        print()
+        print("Enter instructions (empty line to skip, Ctrl+D to finish multi-line):")
+        print("=" * 60)
+
+        lines = []
+        try:
+            while True:
+                line = input()
+                lines.append(line)
+        except EOFError:
+            pass
+        user_instructions = "\n".join(lines).strip()
+
+        if user_instructions:
+            prompt = (
+                f"You are setting up an Ubuntu 24.04 container for development. "
+                f"The user is '{username}' with sudo. "
+                f"Follow these instructions:\n\n{user_instructions}\n\n"
+                f"Run commands directly. Do not ask for confirmation."
+            )
+            print(f"\nStarting Claude inside the container...")
+            lxd.exec_interactive(
+                TEMP_CONTAINER,
+                ["bash", "-lc",
+                 f"claude --allow-dangerously-skip-permissions -p {shlex.quote(prompt)}"],
+                user=container_user,
+            )
+        else:
+            print("No instructions — skipping Claude setup.")
+
+        # --- Interactive shell for manual tweaks ---
+        print()
+        print("=" * 60)
+        print("Dropping into shell. Make any manual changes, then exit.")
         print("The container will be published as the base image.")
-        print("=" * 60 + "\n")
+        print("=" * 60)
+        print()
 
-        lxd.exec_interactive(TEMP_CONTAINER, ["bash"], user=CONTAINER_USER)
+        lxd.exec_interactive(TEMP_CONTAINER, ["bash", "-l"], user=container_user)
 
-        # Remove auto-mounts before publishing (they'll be re-added per sandbox)
-        print("\nRemoving temporary mounts...")
+        # --- Publish ---
+        print("\nPreparing to publish...")
         lxd.stop(TEMP_CONTAINER)
 
-        # Remove all disk devices
-        r = lxd.run_lxc("config", "device", "list", TEMP_CONTAINER, capture=True, check=False)
+        # Remove disk devices (they get re-added per sandbox)
+        r = lxd.run_lxc("config", "device", "list", TEMP_CONTAINER,
+                          capture=True, check=False)
         if r.returncode == 0:
             for dev in r.stdout.strip().splitlines():
                 dev = dev.strip()
                 if dev and dev.startswith("mount-"):
                     lxd.remove_disk_device(TEMP_CONTAINER, dev)
 
-        # Publish as base image
         print(f"Publishing as '{BASE_IMAGE}'...")
         lxd.publish(TEMP_CONTAINER, BASE_IMAGE, force=force)
         print("Base image created successfully.")
@@ -130,7 +208,6 @@ def run_init(force: bool = False, storage_pool: str | None = None) -> None:
     except KeyboardInterrupt:
         print("\nInterrupted. Cleaning up...")
     finally:
-        # Clean up temp container
         if lxd.container_exists(TEMP_CONTAINER):
             print(f"Removing temporary container '{TEMP_CONTAINER}'...")
             lxd.delete(TEMP_CONTAINER, force=True)
