@@ -44,7 +44,7 @@ def create_sandbox(
         raise SystemExit(1)
 
     # Init container from base image (don't start yet — configure first)
-    lxd.init_container(BASE_IMAGE, cname)
+    lxd.init_container(BASE_IMAGE, cname, storage=config.state.storage_pool)
 
     # Set UID mapping
     lxd.set_config(cname, "raw.idmap", IDMAP_VALUE)

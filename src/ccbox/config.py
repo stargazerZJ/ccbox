@@ -47,18 +47,23 @@ class SandboxEntry:
 class State:
     sandboxes: dict[str, SandboxEntry] = field(default_factory=dict)
     env_whitelist: list[str] = field(default_factory=list)
+    storage_pool: str | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "sandboxes": {k: v.to_dict() for k, v in self.sandboxes.items()},
             "env_whitelist": self.env_whitelist,
         }
+        if self.storage_pool is not None:
+            d["storage_pool"] = self.storage_pool
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> State:
         return cls(
             sandboxes={k: SandboxEntry.from_dict(v) for k, v in d.get("sandboxes", {}).items()},
             env_whitelist=d.get("env_whitelist", []),
+            storage_pool=d.get("storage_pool"),
         )
 
 
@@ -119,3 +124,7 @@ class Config:
         if var in self._state.env_whitelist:
             self._state.env_whitelist.remove(var)
             self.save()
+
+    def set_storage_pool(self, pool: str | None) -> None:
+        self._state.storage_pool = pool
+        self.save()

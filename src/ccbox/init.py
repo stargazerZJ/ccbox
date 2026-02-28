@@ -32,7 +32,7 @@ def check_prerequisites() -> None:
         raise SystemExit(1)
 
 
-def run_init(force: bool = False) -> None:
+def run_init(force: bool = False, storage_pool: str | None = None) -> None:
     """Create the ccbox-base image.
 
     1. Launch temp container from ubuntu:24.04
@@ -54,7 +54,10 @@ def run_init(force: bool = False) -> None:
 
     try:
         print(f"Creating temporary container from {BASE_OS_IMAGE}...")
-        lxd.run_lxc("launch", BASE_OS_IMAGE, TEMP_CONTAINER)
+        launch_args = ["launch", BASE_OS_IMAGE, TEMP_CONTAINER]
+        if storage_pool:
+            launch_args += ["-s", storage_pool]
+        lxd.run_lxc(*launch_args)
 
         # Wait for container to be ready
         print("Waiting for container to start...")

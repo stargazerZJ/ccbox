@@ -40,8 +40,11 @@ def container_state(name: str) -> str:
     return "NotFound"
 
 
-def init_container(image: str, name: str) -> None:
-    run_lxc("init", image, name)
+def init_container(image: str, name: str, *, storage: str | None = None) -> None:
+    args = ["init", image, name]
+    if storage:
+        args += ["-s", storage]
+    run_lxc(*args)
 
 
 def start(name: str) -> None:

@@ -246,26 +246,41 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
     lxd.exec_interactive(container, ["bash", "-l"], user="1000", cwd=cwd)
 
 
-def cmd_config_env(config: Config, args: argparse.Namespace) -> None:
-    """Manage env whitelist."""
-    if args.env_action == "add":
-        config.add_env(args.var)
-        print(f"Added '{args.var}' to env whitelist.")
-    elif args.env_action == "remove":
-        config.remove_env(args.var)
-        print(f"Removed '{args.var}' from env whitelist.")
-    elif args.env_action == "list":
-        wl = config.state.env_whitelist
-        if not wl:
-            print("No env vars in whitelist.")
+def cmd_config(config: Config, args: argparse.Namespace) -> None:
+    """Dispatch config subcommands."""
+    if args.config_type == "env":
+        if args.env_action == "add":
+            config.add_env(args.var)
+            print(f"Added '{args.var}' to env whitelist.")
+        elif args.env_action == "remove":
+            config.remove_env(args.var)
+            print(f"Removed '{args.var}' from env whitelist.")
+        elif args.env_action == "list":
+            wl = config.state.env_whitelist
+            if not wl:
+                print("No env vars in whitelist.")
+            else:
+                for v in wl:
+                    print(f"  {v}")
+    elif args.config_type == "pool":
+        if args.pool_name is not None:
+            config.set_storage_pool(args.pool_name)
+            print(f"Storage pool set to '{args.pool_name}'.")
         else:
-            for v in wl:
-                print(f"  {v}")
+            pool = config.state.storage_pool
+            if pool:
+                print(f"Storage pool: {pool}")
+            else:
+                print("No storage pool configured (using LXD default).")
 
 
 def cmd_init(config: Config, args: argparse.Namespace) -> None:
     """Create the base image."""
-    run_init(force=args.force)
+    # --storage flag overrides and persists the pool setting
+    storage = args.storage or config.state.storage_pool
+    if args.storage:
+        config.set_storage_pool(args.storage)
+    run_init(force=args.force, storage_pool=storage)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -339,9 +354,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_env_remove.add_argument("var", help="Environment variable name")
     env_sub.add_parser("list", help="List whitelisted env vars")
 
-    # ccbox init [--force]
+    # ccbox config pool [name]
+    p_pool = config_sub.add_parser("pool", help="Get/set LXD storage pool")
+    p_pool.add_argument("pool_name", nargs="?", default=None, help="Pool name (omit to show current)")
+
+    # ccbox init [--force] [--storage POOL]
     p_init = sub.add_parser("init", help="Create base image")
     p_init.add_argument("--force", action="store_true", help="Rebuild existing base image")
+    p_init.add_argument("--storage", "-s", metavar="POOL", help="LXD storage pool to use (saved for future sandboxes)")
 
     return parser
 
@@ -360,7 +380,7 @@ COMMAND_MAP = {
     "rm": cmd_rm,
     "status": cmd_status,
     "shell": cmd_shell,
-    "config": cmd_config_env,
+    "config": cmd_config,
     "init": cmd_init,
 }
 
