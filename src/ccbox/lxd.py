@@ -164,5 +164,72 @@ def list_containers(prefix: str = "ccbox-") -> list[dict]:
     return json.loads(r.stdout)
 
 
+def add_proxy_device(
+    container: str,
+    dev_name: str,
+    listen: str,
+    connect: str,
+    bind: str = "host",
+) -> None:
+    """Add a proxy device for port forwarding.
+
+    Args:
+        listen: e.g. "tcp:127.0.0.1:8080"
+        connect: e.g. "tcp:127.0.0.1:3000"
+        bind: "host" (listen on host) or "instance" (listen in container)
+    """
+    run_lxc(
+        "config", "device", "add", container, dev_name, "proxy",
+        f"listen={listen}", f"connect={connect}", f"bind={bind}",
+    )
+
+
+def remove_device(container: str, dev_name: str) -> None:
+    run_lxc("config", "device", "remove", container, dev_name)
+
+
+def list_devices(container: str) -> dict:
+    """Return all devices on a container as {name: {key: value}}."""
+    r = run_lxc("config", "device", "show", container, capture=True)
+    # Output is YAML — parse minimally to avoid pyyaml dependency
+    import re
+    devices: dict[str, dict[str, str]] = {}
+    current: str | None = None
+    for line in r.stdout.splitlines():
+        # Top-level device name (no leading whitespace, ends with colon)
+        m = re.match(r"^(\S+):$", line)
+        if m:
+            current = m.group(1)
+            devices[current] = {}
+            continue
+        # Key-value under a device
+        if current is not None:
+            kv = re.match(r"^\s+(\S+):\s+(.*)$", line)
+            if kv:
+                devices[current][kv.group(1)] = kv.group(2)
+    return devices
+
+
 def set_config(container: str, key: str, value: str) -> None:
     run_lxc("config", "set", container, key, value)
+
+
+def pull_path(container: str, remote: str, local: str, *, recursive: bool = False) -> None:
+    """Pull a file or directory from a container."""
+    args = ["file", "pull"]
+    if recursive:
+        args.append("-r")
+    args += [f"{container}{remote}", local]
+    run_lxc(*args)
+
+
+def path_exists(container: str, path: str) -> bool:
+    """Check if a path exists inside a container."""
+    r = exec_cmd(container, ["test", "-e", path], capture=True, check=False)
+    return r.returncode == 0
+
+
+def is_directory(container: str, path: str) -> bool:
+    """Check if a path is a directory inside a container."""
+    r = exec_cmd(container, ["test", "-d", path], capture=True, check=False)
+    return r.returncode == 0

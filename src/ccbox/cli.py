@@ -19,6 +19,13 @@ from ccbox.sandbox import (
     sandbox_status,
     stop_sandbox,
 )
+from ccbox.port import (
+    add_expose,
+    add_forward,
+    list_ports,
+    remove_port,
+    _parse_addr_port,
+)
 from ccbox.session import (
     attach_session,
     build_claude_command,
@@ -283,6 +290,43 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
     )
 
 
+def cmd_port(config: Config, args: argparse.Namespace) -> None:
+    """Dispatch port subcommands."""
+    sandbox_name = resolve_sandbox(config, args.sandbox)
+    container = ensure_running(config, sandbox_name)
+
+    if args.port_action == "forward":
+        host_addr, host_port = _parse_addr_port(args.target)
+        name = add_forward(
+            container, args.container_port, host_addr, host_port, udp=args.udp,
+        )
+        proto = "udp" if args.udp else "tcp"
+        print(f"Forward ({proto}): container:{args.container_port} → {host_addr}:{host_port}  [{name}]")
+
+    elif args.port_action == "expose":
+        bind_addr, bind_port = _parse_addr_port(args.bind, default_addr="127.0.0.1") if args.bind else ("127.0.0.1", None)
+        name = add_expose(
+            container, args.container_port, bind_addr, bind_port, udp=args.udp,
+        )
+        proto = "udp" if args.udp else "tcp"
+        effective_port = bind_port if bind_port is not None else args.container_port
+        print(f"Expose ({proto}): {bind_addr}:{effective_port} → container:{args.container_port}  [{name}]")
+
+    elif args.port_action == "ls":
+        ports = list_ports(container)
+        if not ports:
+            print("No port forwards.")
+            return
+        print(f"{'NAME':<24} {'DIRECTION':<10} {'LISTEN':<28} {'CONNECT':<28}")
+        print("-" * 92)
+        for p in ports:
+            print(f"{p['name']:<24} {p['direction']:<10} {p['listen']:<28} {p['connect']:<28}")
+
+    elif args.port_action == "rm":
+        remove_port(container, args.name)
+        print(f"Removed '{args.name}'.")
+
+
 def cmd_config(config: Config, args: argparse.Namespace) -> None:
     """Dispatch config subcommands."""
     if args.config_type == "env":
@@ -335,6 +379,49 @@ def cmd_config(config: Config, args: argparse.Namespace) -> None:
             config._state.auto_mounts = None
             config.save()
             print("Auto-mounts reset to defaults.")
+
+
+def cmd_cp(config: Config, args: argparse.Namespace) -> None:
+    """Copy a file or directory from a sandbox to the host, then mount it rw."""
+    sandbox_name = resolve_sandbox(config, args.sandbox)
+    container = ensure_running(config, sandbox_name)
+
+    # Resolve src to absolute path
+    src = args.src if os.path.isabs(args.src) else os.path.join(os.getcwd(), args.src)
+    src = os.path.normpath(src)
+
+    # Default dest = src (identity-mapped paths)
+    dest = args.dest if args.dest else src
+    dest = dest if os.path.isabs(dest) else os.path.join(os.getcwd(), dest)
+    dest = os.path.normpath(dest)
+
+    # Validate source exists in container
+    if not lxd.path_exists(container, src):
+        print(f"Error: '{src}' does not exist in container.", file=sys.stderr)
+        raise SystemExit(1)
+
+    # Refuse to overwrite existing host path
+    if os.path.exists(dest):
+        print(f"Error: '{dest}' already exists on host.", file=sys.stderr)
+        raise SystemExit(1)
+
+    is_dir = lxd.is_directory(container, src)
+    parent = os.path.dirname(dest)
+    os.makedirs(parent, exist_ok=True)
+
+    if is_dir:
+        # lxc file pull -r puts basename/ inside the target dir
+        lxd.pull_path(container, src, parent, recursive=True)
+        # If src basename differs from dest basename, rename
+        pulled = os.path.join(parent, os.path.basename(src))
+        if pulled != dest:
+            os.rename(pulled, dest)
+        add_mount(config, sandbox_name, dest)
+        print(f"Copied directory {src} → {dest} (mounted rw)")
+    else:
+        lxd.pull_path(container, src, dest)
+        add_mount(config, sandbox_name, dest)
+        print(f"Copied {src} → {dest} (mounted rw)")
 
 
 def cmd_init(config: Config, args: argparse.Namespace) -> None:
@@ -410,6 +497,39 @@ def build_parser() -> argparse.ArgumentParser:
     p_shell = sub.add_parser("shell", help="Bash shell in sandbox")
     p_shell.add_argument("sandbox", nargs="?", default=None, help="Sandbox name")
 
+    # ccbox port {forward,expose,ls,rm}
+    p_port = sub.add_parser("port", help="Port forwarding")
+    port_sub = p_port.add_subparsers(dest="port_action")
+
+    # ccbox port forward <container_port> [addr:]<host_port> [--udp] [sandbox]
+    p_fwd = port_sub.add_parser("forward", help="Container→Host forwarding")
+    p_fwd.add_argument("container_port", type=int, help="Port inside container")
+    p_fwd.add_argument("target", help="[addr:]port on host side")
+    p_fwd.add_argument("--udp", action="store_true", help="Use UDP instead of TCP")
+    p_fwd.add_argument("sandbox", nargs="?", default=None, help="Sandbox name")
+
+    # ccbox port expose <container_port> [[addr:]<bind_port>] [--udp] [sandbox]
+    p_exp = port_sub.add_parser("expose", help="Host→Container forwarding")
+    p_exp.add_argument("container_port", type=int, help="Port inside container")
+    p_exp.add_argument("bind", nargs="?", default=None, help="[addr:]port to bind on host (default: localhost:container_port)")
+    p_exp.add_argument("--udp", action="store_true", help="Use UDP instead of TCP")
+    p_exp.add_argument("sandbox", nargs="?", default=None, help="Sandbox name")
+
+    # ccbox port ls [sandbox]
+    p_port_ls = port_sub.add_parser("ls", help="List port forwards")
+    p_port_ls.add_argument("sandbox", nargs="?", default=None, help="Sandbox name")
+
+    # ccbox port rm <name> [sandbox]
+    p_port_rm = port_sub.add_parser("rm", help="Remove a port forward")
+    p_port_rm.add_argument("name", help="Device name (from port ls)")
+    p_port_rm.add_argument("sandbox", nargs="?", default=None, help="Sandbox name")
+
+    # ccbox cp <src> [dest] [--sandbox NAME]
+    p_cp = sub.add_parser("cp", help="Copy file/dir from sandbox to host")
+    p_cp.add_argument("src", help="Path inside the container")
+    p_cp.add_argument("dest", nargs="?", default=None, help="Destination on host (default: same path)")
+    p_cp.add_argument("--sandbox", default=None, help="Sandbox name (default: auto from CWD)")
+
     # ccbox config env add/remove/list
     p_config = sub.add_parser("config", help="Configuration management")
     config_sub = p_config.add_subparsers(dest="config_type")
@@ -459,6 +579,8 @@ COMMAND_MAP = {
     "rm": cmd_rm,
     "status": cmd_status,
     "shell": cmd_shell,
+    "port": cmd_port,
+    "cp": cmd_cp,
     "config": cmd_config,
     "init": cmd_init,
 }
@@ -490,6 +612,11 @@ def main() -> None:
             if not hasattr(args, "mounts_action") or args.mounts_action is None:
                 parser.parse_args(["config", "mounts", "--help"])
                 raise SystemExit(1)
+
+    if args.command == "port":
+        if not hasattr(args, "port_action") or args.port_action is None:
+            parser.parse_args(["port", "--help"])
+            raise SystemExit(1)
 
     try:
         handler(config, args)
