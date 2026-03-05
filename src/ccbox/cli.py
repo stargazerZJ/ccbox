@@ -8,7 +8,7 @@ import sys
 
 from ccbox.config import Config
 from ccbox.init import run_init
-from ccbox.mount import add_mount, remove_mount
+from ccbox.mount import add_mount, remove_mount, sync_auto_mounts
 from ccbox.sandbox import (
     auto_sandbox_name_from_cwd,
     create_sandbox,
@@ -266,7 +266,8 @@ def cmd_status(config: Config, args: argparse.Namespace) -> None:
     if status["mounts"]:
         print("Mounts:")
         for m in status["mounts"]:
-            print(f"  {m['path']} ({m['mode']})")
+            inode = f" inode={m['inode']}" if m.get("inode") else ""
+            print(f"  {m['path']} ({m['mode']}{inode})")
 
     if status["sessions"]:
         print("Sessions:")
@@ -379,6 +380,45 @@ def cmd_config(config: Config, args: argparse.Namespace) -> None:
             config._state.auto_mounts = None
             config.save()
             print("Auto-mounts reset to defaults.")
+
+
+def cmd_sync_automount(config: Config, args: argparse.Namespace) -> None:
+    """Sync current auto-mount config to running sandbox(es)."""
+    if args.all:
+        targets = list(config.state.sandboxes.keys())
+        if not targets:
+            print("No sandboxes.")
+            return
+    else:
+        name = resolve_sandbox(config, args.sandbox)
+        targets = [name]
+
+    total_changes = 0
+    for name in targets:
+        entry = config.get_sandbox(name)
+        if entry is None:
+            continue
+        # Ensure container is running
+        try:
+            ensure_running(config, name)
+        except Exception as e:
+            print(f"Sandbox '{name}': skipping ({e})", file=sys.stderr)
+            continue
+
+        changes = sync_auto_mounts(config, name, dry_run=args.dry_run)
+        if changes:
+            print(f"Sandbox '{name}':")
+            for line in changes:
+                print(line)
+            total_changes += len(changes)
+        elif not args.all:
+            print(f"Sandbox '{name}': already in sync.")
+
+    if total_changes:
+        suffix = " (dry run)" if args.dry_run else ""
+        print(f"\n{total_changes} change(s){suffix}.")
+    elif args.all:
+        print("All sandboxes in sync.")
 
 
 def cmd_cp(config: Config, args: argparse.Namespace) -> None:
@@ -524,6 +564,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_port_rm.add_argument("name", help="Device name (from port ls)")
     p_port_rm.add_argument("sandbox", nargs="?", default=None, help="Sandbox name")
 
+    # ccbox sync-automount [sandbox] [--all] [--dry-run]
+    p_sync = sub.add_parser("sync-automount", help="Sync auto-mount config to running sandbox(es)")
+    p_sync.add_argument("sandbox", nargs="?", default=None, help="Sandbox name (default: auto from CWD)")
+    p_sync.add_argument("--all", action="store_true", help="Sync all sandboxes")
+    p_sync.add_argument("--dry-run", "-n", action="store_true", help="Show changes without applying")
+
     # ccbox cp <src> [dest] [--sandbox NAME]
     p_cp = sub.add_parser("cp", help="Copy file/dir from sandbox to host")
     p_cp.add_argument("src", help="Path inside the container")
@@ -580,6 +626,7 @@ COMMAND_MAP = {
     "status": cmd_status,
     "shell": cmd_shell,
     "port": cmd_port,
+    "sync-automount": cmd_sync_automount,
     "cp": cmd_cp,
     "config": cmd_config,
     "init": cmd_init,

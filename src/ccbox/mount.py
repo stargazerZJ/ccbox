@@ -50,7 +50,7 @@ def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
         reason = None
         if not os.path.exists(m.path):
             reason = "no longer exists on host"
-        elif m.inode is not None and _inode_key(m.path) != m.inode:
+        elif _inode_key(m.path) != m.inode:
             reason = "replaced by a different directory"
 
         if reason:
@@ -235,6 +235,116 @@ def fix_mount_parents(container: str, config: Config | None = None) -> None:
         check=False,
     )
 
+
+
+def sync_auto_mounts(
+    config: Config,
+    sandbox_name: str,
+    *,
+    dry_run: bool = False,
+) -> list[str]:
+    """Sync current auto-mount config to a running sandbox.
+
+    Compares desired auto-mounts against actual LXD devices.
+    Adds missing, updates mode-changed, removes stale auto-mount devices
+    (but never touches user mounts tracked in SandboxEntry.mounts).
+
+    Returns list of human-readable change descriptions.
+    """
+    entry = config.get_sandbox(sandbox_name)
+    if entry is None:
+        raise ValueError(f"Sandbox '{sandbox_name}' not found")
+
+    container = entry.container
+
+    # Desired auto-mounts (after normalization)
+    desired: dict[str, tuple[str, str, bool]] = {}  # dev_name -> (source, target, readonly)
+    raw_mounts = config.state.get_auto_mounts()
+    seen_targets: set[str] = set()
+    for raw in raw_mounts:
+        m = _normalize_mount(raw)
+        if m is None:
+            continue
+        source = os.path.realpath(m.path)
+        target = m.target if m.target is not None else m.path
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        if not os.path.exists(source) and m.optional:
+            continue
+        dev_name = device_name_from_path(target)
+        readonly = m.mode == "ro"
+        desired[dev_name] = (source, target, readonly)
+
+    # Actual LXD devices
+    actual = lxd.list_devices(container)
+
+    # User mount device names (these are sacred — never touch)
+    user_dev_names: set[str] = set()
+    for m in entry.mounts:
+        user_dev_names.add(device_name_from_path(m.path))
+        if m.target:
+            user_dev_names.add(device_name_from_path(m.target))
+
+    changes: list[str] = []
+
+    # 1. Add missing / update changed
+    for dev_name, (source, target, readonly) in desired.items():
+        if dev_name in user_dev_names:
+            continue  # user mount at same path takes precedence
+        existing = actual.get(dev_name)
+        if existing is None:
+            # Missing — add it
+            mode_str = "ro" if readonly else "rw"
+            changes.append(f"  + {target} ({mode_str})")
+            if not dry_run:
+                if not os.path.exists(source):
+                    if os.path.splitext(source)[1]:
+                        os.makedirs(os.path.dirname(source), exist_ok=True)
+                        open(source, "a").close()
+                    else:
+                        os.makedirs(source, exist_ok=True)
+                lxd.add_disk_device(
+                    container, dev_name, source, target,
+                    readonly=readonly, shift=True,
+                )
+        else:
+            # Exists — check if mode changed
+            is_ro = existing.get("readonly") == "true"
+            if is_ro != readonly:
+                old_mode = "ro" if is_ro else "rw"
+                new_mode = "ro" if readonly else "rw"
+                changes.append(f"  ~ {target} ({old_mode} -> {new_mode})")
+                if not dry_run:
+                    lxd.remove_disk_device(container, dev_name)
+                    lxd.add_disk_device(
+                        container, dev_name, source, target,
+                        readonly=readonly, shift=True,
+                    )
+
+    # 2. Remove stale auto-mount devices (in LXD but no longer in config)
+    #    Only remove "mount-*" devices that aren't user mounts and aren't desired.
+    for dev_name, props in actual.items():
+        if not dev_name.startswith("mount-"):
+            continue
+        if dev_name in desired:
+            continue
+        if dev_name in user_dev_names:
+            continue
+        target = props.get("path", "?")
+        mode_str = "ro" if props.get("readonly") == "true" else "rw"
+        changes.append(f"  - {target} ({mode_str})")
+        if not dry_run:
+            try:
+                lxd.remove_disk_device(container, dev_name)
+            except Exception:
+                pass
+
+    # Fix parent dirs if we made changes
+    if changes and not dry_run:
+        fix_mount_parents(container, config)
+
+    return changes
 
 
 def add_auto_mounts(container: str, config: Config | None = None) -> None:

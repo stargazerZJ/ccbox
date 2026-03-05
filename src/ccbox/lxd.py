@@ -206,7 +206,11 @@ def list_devices(container: str) -> dict:
         if current is not None:
             kv = re.match(r"^\s+(\S+):\s+(.*)$", line)
             if kv:
-                devices[current][kv.group(1)] = kv.group(2)
+                val = kv.group(2)
+                # Strip YAML string quotes: "true" → true
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                    val = val[1:-1]
+                devices[current][kv.group(1)] = val
     return devices
 
 
