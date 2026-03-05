@@ -360,6 +360,9 @@ def cmd_config(config: Config, args: argparse.Namespace) -> None:
             config.add_auto_mount(args.path, mode)
             resolved = os.path.realpath(args.path)
             print(f"Added auto-mount: {resolved} ({mode})")
+            if os.path.isfile(resolved):
+                from ccbox.mount import _warn_file_mount
+                _warn_file_mount(resolved)
         elif args.mounts_action == "remove":
             if config.remove_auto_mount(args.path):
                 print(f"Removed auto-mount: {os.path.realpath(args.path)}")

@@ -31,6 +31,33 @@ def _inode_key(path: str) -> str | None:
         return None
 
 
+def _warn_file_mount(path: str) -> None:
+    """Warn that bind-mounting a single file won't track replacements."""
+    parent = os.path.dirname(path)
+    print(
+        f"Note: Mounting a single file. LXD bind mounts track by inode — if the\n"
+        f"  host file is replaced (e.g. by an editor or sed -i), the container\n"
+        f"  will still see the old content. Consider mounting the parent directory\n"
+        f"  instead: {parent}",
+        file=sys.stderr,
+    )
+
+
+def _container_ino(container: str, path: str) -> int | None:
+    """Return the inode number for a path inside the container, or None."""
+    r = lxd.exec_cmd(
+        container,
+        ["stat", "-c", "%i", path],
+        capture=True, check=False,
+    )
+    if r.returncode == 0:
+        try:
+            return int(r.stdout.strip())
+        except ValueError:
+            pass
+    return None
+
+
 def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
     """Remove mounts whose host paths no longer exist or whose inode changed.
 
@@ -96,6 +123,9 @@ def add_mount(
 
     # Clean up stale mounts before adding (host paths that no longer exist)
     prune_stale_mounts(config, sandbox_name)
+
+    if os.path.isfile(resolved):
+        _warn_file_mount(resolved)
 
     lxd.add_disk_device(
         entry.container, dev_name, resolved, resolved,
@@ -288,7 +318,7 @@ def sync_auto_mounts(
 
     changes: list[str] = []
 
-    # 1. Add missing / update changed
+    # 1. Add missing / update changed / fix stale inodes
     for dev_name, (source, target, readonly) in desired.items():
         if dev_name in user_dev_names:
             continue  # user mount at same path takes precedence
@@ -309,12 +339,32 @@ def sync_auto_mounts(
                     readonly=readonly, shift=True,
                 )
         else:
-            # Exists — check if mode changed
+            needs_readd = False
+            reason_parts: list[str] = []
+
+            # Check if mode changed
             is_ro = existing.get("readonly") == "true"
             if is_ro != readonly:
                 old_mode = "ro" if is_ro else "rw"
                 new_mode = "ro" if readonly else "rw"
-                changes.append(f"  ~ {target} ({old_mode} -> {new_mode})")
+                reason_parts.append(f"{old_mode} -> {new_mode}")
+                needs_readd = True
+
+            # Check if source inode changed (file was replaced).
+            # Bind mounts preserve the inode number, so if the host path
+            # now points to a different inode than what the container sees,
+            # the file was replaced and the mount is stale.
+            if os.path.exists(source) and not os.path.isdir(source):
+                host_ino = os.stat(source).st_ino
+                container_ino = _container_ino(container, target)
+                if container_ino is not None and host_ino != container_ino:
+                    reason_parts.append("inode changed")
+                    needs_readd = True
+
+            if needs_readd:
+                mode_str = "ro" if readonly else "rw"
+                reason = ", ".join(reason_parts)
+                changes.append(f"  ~ {target} ({reason})")
                 if not dry_run:
                     lxd.remove_disk_device(container, dev_name)
                     lxd.add_disk_device(
