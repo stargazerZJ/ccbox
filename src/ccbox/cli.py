@@ -137,7 +137,7 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
         choice = input("Select: ").strip()
         if choice == "n":
             cmd = build_claude_command()
-            name = create_session(container, cmd, cwd=cwd, env=env)
+            name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
             attach_session(container, name)
         else:
             try:
@@ -149,7 +149,7 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
     else:
         # No detached sessions — create new one
         cmd = build_claude_command()
-        name = create_session(container, cmd, cwd=cwd, env=env)
+        name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
         attach_session(container, name)
 
 
@@ -175,7 +175,7 @@ def cmd_claude(config: Config, args: argparse.Namespace) -> None:
     env = get_forwarded_env(config.state.env_whitelist)
 
     cmd = build_claude_command(args.claude_args)
-    name = create_session(container, cmd, cwd=cwd, env=env)
+    name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
     attach_session(container, name)
 
 
@@ -201,7 +201,7 @@ def cmd_codex(config: Config, args: argparse.Namespace) -> None:
     env = get_forwarded_env(config.state.env_whitelist)
 
     cmd = build_codex_command(args.codex_args)
-    name = create_session(container, cmd, cwd=cwd, env=env)
+    name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
     attach_session(container, name)
 
 
@@ -324,8 +324,8 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
     # -w preserves CCBOX_CWD through the login env reset; .bashrc cd's to it.
     lxd.exec_interactive(
         container,
-        ["su", "-l", username, "-w", "CCBOX_CWD"],
-        env={"CCBOX_CWD": cwd},
+        ["su", "-l", username, "-w", "CCBOX_CWD,CCBOX_SANDBOX"],
+        env={"CCBOX_CWD": cwd, "CCBOX_SANDBOX": sandbox_name},
     )
 
 

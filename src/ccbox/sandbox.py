@@ -117,6 +117,7 @@ def ensure_running(config: Config, name: str) -> str:
         ensure_profile_script()
         ensure_server_running()
         lxd.start(entry.container)
+        fix_mount_parents(entry.container, config)
     return entry.container
 
 

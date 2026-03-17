@@ -66,6 +66,7 @@ def create_session(
     cwd: str | None = None,
     env: dict[str, str] | None = None,
     session_name: str | None = None,
+    sandbox_name: str | None = None,
 ) -> str:
     """Create a new tmux session inside the container.
 
@@ -77,6 +78,11 @@ def create_session(
 
     if env is None:
         env = {}
+
+    # Sandbox identity vars
+    env.setdefault("IS_SANDBOX", "1")
+    if sandbox_name is not None:
+        env.setdefault("CCBOX_SANDBOX", sandbox_name)
 
     # Ensure HOME is set — lxc exec with --env flags may not inherit it
     from pathlib import Path

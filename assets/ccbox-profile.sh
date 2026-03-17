@@ -1,4 +1,5 @@
 # ccbox container shell profile — sourced by .bashrc
+export IS_SANDBOX=1
 export PATH="$HOME/.local/bin:$PATH"
 stty -ixon 2>/dev/null || true
 
