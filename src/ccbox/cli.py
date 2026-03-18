@@ -174,7 +174,10 @@ def cmd_claude(config: Config, args: argparse.Namespace) -> None:
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
 
-    cmd = build_claude_command(args.claude_args)
+    claude_args = args.claude_args
+    if claude_args and claude_args[0] == "--":
+        claude_args = claude_args[1:]
+    cmd = build_claude_command(claude_args)
     name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
     attach_session(container, name)
 
@@ -200,7 +203,10 @@ def cmd_codex(config: Config, args: argparse.Namespace) -> None:
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
 
-    cmd = build_codex_command(args.codex_args)
+    codex_args = args.codex_args
+    if codex_args and codex_args[0] == "--":
+        codex_args = codex_args[1:]
+    cmd = build_codex_command(codex_args)
     name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
     attach_session(container, name)
 
@@ -521,17 +527,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
 
-    # ccbox claude [-s SANDBOX] [args...]
+    # ccbox claude [-s SANDBOX] [-- args...]
     p_claude = sub.add_parser("claude", help="New session running claude with given args")
     p_claude.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
                           help="Sandbox name (default: auto from CWD)")
-    p_claude.add_argument("claude_args", nargs=argparse.REMAINDER, help="Arguments to pass to claude")
+    p_claude.add_argument("claude_args", nargs=argparse.REMAINDER, help="Arguments to pass to claude (use -- to separate)")
 
     # ccbox codex [-s SANDBOX] [-- args...]
     p_codex = sub.add_parser("codex", help="New session running codex --yolo with given args")
     p_codex.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
                          help="Sandbox name (default: auto from CWD)")
-    p_codex.add_argument("codex_args", nargs=argparse.REMAINDER, help="Arguments to pass to codex")
+    p_codex.add_argument("codex_args", nargs=argparse.REMAINDER, help="Arguments to pass to codex (use -- to separate)")
 
     # ccbox ls
     sub.add_parser("ls", help="List sandboxes")
