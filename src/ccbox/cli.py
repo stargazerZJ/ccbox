@@ -326,12 +326,16 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
     container = ensure_running(config, sandbox_name)
     cwd = os.getcwd()
     username = _container_username(container)
+    env = get_forwarded_env(config.state.env_whitelist)
+    env["CCBOX_CWD"] = cwd
+    env["CCBOX_SANDBOX"] = sandbox_name
     # su -l gives a full login env (PAM, /etc/environment, profiles).
-    # -w preserves CCBOX_CWD through the login env reset; .bashrc cd's to it.
+    # -w preserves listed vars through the login env reset; .bashrc cd's to CCBOX_CWD.
+    preserve = ",".join(env.keys())
     lxd.exec_interactive(
         container,
-        ["su", "-l", username, "-w", "CCBOX_CWD,CCBOX_SANDBOX"],
-        env={"CCBOX_CWD": cwd, "CCBOX_SANDBOX": sandbox_name},
+        ["su", "-l", username, "-w", preserve],
+        env=env,
     )
 
 

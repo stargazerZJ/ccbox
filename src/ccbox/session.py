@@ -107,6 +107,23 @@ def create_session(
 
     lxd.exec_cmd(container, tmux_args, user=CONTAINER_USER, env=env)
 
+    # Inject env vars via tmux set-environment so they propagate to the
+    # session shell without appearing in send-keys / scrollback.
+    for k, v in env.items():
+        lxd.exec_cmd(
+            container,
+            ["tmux", "set-environment", "-t", session_name, k, v],
+            user=CONTAINER_USER,
+        )
+
+    # Respawn the session pane so the shell picks up the new environment.
+    # respawn-pane -k kills the existing shell and starts a fresh one that
+    # inherits the tmux session environment we just set.
+    respawn = ["tmux", "respawn-pane", "-k", "-t", session_name]
+    if cwd:
+        respawn += ["-c", cwd]
+    lxd.exec_cmd(container, respawn, user=CONTAINER_USER)
+
     # exec replaces bash with the command — when it exits, the tmux session ends.
     lxd.exec_cmd(
         container,
