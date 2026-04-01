@@ -60,7 +60,7 @@ def create_sandbox(
         raise ValueError(f"Sandbox '{name}' already exists")
 
     if not lxd.image_exists(BASE_IMAGE):
-        print("Base image not found. Run 'ccbox init' first.", file=sys.stderr)
+        print("Base image not found. Run /setup to create the base image.", file=sys.stderr)
         raise SystemExit(1)
 
     # Ensure uv shim, profile script, and server are ready before creating container

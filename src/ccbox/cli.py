@@ -7,7 +7,7 @@ import os
 import sys
 
 from ccbox.config import Config, SESSION_LINK_DIR
-from ccbox.init import run_init
+
 from ccbox.mount import add_mount, remove_mount, sync_auto_mounts
 from ccbox.sandbox import (
     auto_sandbox_name_from_cwd,
@@ -37,7 +37,7 @@ from ccbox.session import (
     kill_session,
     list_sessions,
 )
-from ccbox.transcript import read_session_info, relative_time, format_size
+from ccbox.transcript import read_session_info_any, relative_time
 from ccbox import lxd
 
 
@@ -97,7 +97,7 @@ def _session_info(sandbox_name: str, tmux_session: str) -> dict | None:
         return None
     if not transcript_path:
         return None
-    return read_session_info(transcript_path)
+    return read_session_info_any(transcript_path)
 
 
 def _format_session_line(index: int, tmux_name: str, info: dict | None, attached: bool = False) -> str:
@@ -116,13 +116,15 @@ def _format_session_line(index: int, tmux_name: str, info: dict | None, attached
         parts.append(ts)
     if info["git_branch"]:
         parts.append(info["git_branch"])
-    parts.append(format_size(info["size_bytes"]))
+    count = info.get("message_count", 0)
+    if count:
+        parts.append(f"{count} msg{'s' if count != 1 else ''}")
     detail = " · ".join(parts)
     return f"  [{index}] {tmux_name} ({status})  {detail}"
 
 
 def cmd_session_link(config: Config, args: argparse.Namespace) -> None:
-    """Internal: called by Claude Code SessionStart hook to link tmux↔claude session."""
+    """Internal: called by SessionStart hook to link tmux↔transcript session."""
     import json as _json
     sandbox = os.environ.get("CCBOX_SANDBOX", "")
     tmux_session = os.environ.get("CCBOX_TMUX_SESSION", "")
@@ -584,14 +586,6 @@ def cmd_cp(config: Config, args: argparse.Namespace) -> None:
         print(f"Copied {src} → {dest} (mounted rw)")
 
 
-def cmd_init(config: Config, args: argparse.Namespace) -> None:
-    """Create the base image."""
-    # --storage flag overrides and persists the pool setting
-    storage = args.storage or config.state.storage_pool
-    if args.storage:
-        config.set_storage_pool(args.storage)
-    run_init(force=args.force, storage_pool=storage)
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -746,11 +740,6 @@ def build_parser() -> argparse.ArgumentParser:
     mounts_sub.add_parser("list", help="List auto-mounts")
     mounts_sub.add_parser("reset", help="Reset to defaults")
 
-    # ccbox init [--force] [--storage POOL]
-    p_init = sub.add_parser("init", help="Create base image")
-    p_init.add_argument("--force", action="store_true", help="Rebuild existing base image")
-    p_init.add_argument("--storage", metavar="POOL", help="LXD storage pool to use (saved for future sandboxes)")
-
     # ccbox _session-link  (internal: Claude hook)
     sub.add_parser("_session-link", help=argparse.SUPPRESS)
 
@@ -777,7 +766,6 @@ COMMAND_MAP = {
     "cp": cmd_cp,
     "resolve": cmd_resolve,
     "config": cmd_config,
-    "init": cmd_init,
     "_session-link": cmd_session_link,
 }
 

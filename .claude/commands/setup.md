@@ -191,6 +191,30 @@ lxc delete ccbox-init-temp
 
 Print: **"ccbox is ready. Run `ccbox` in any project directory to start a sandboxed session."**
 
+## Phase 4: Hook configuration
+
+Set up session-link hooks so the session picker shows rich info (last prompt, time, branch).
+
+### Claude Code
+Add to `~/.claude/settings.json` (create the `hooks` key if it doesn't exist):
+```json
+"hooks": {
+  "SessionStart": [{ "hooks": [{ "type": "command", "command": "ccbox _session-link" }] }]
+}
+```
+
+### Codex CLI
+Add to `~/.codex/hooks.json` (create the file if it doesn't exist):
+```json
+{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"ccbox _session-link"}]}]}}
+```
+
+Enable hooks in `~/.codex/config.toml`:
+```toml
+[features]
+codex_hooks = true
+```
+
 ## Important
 - If anything fails, show the error and try to fix it. Only ask the user if you can't resolve it yourself.
 - The `--reuse` flag on publish is needed if `ccbox-base` already exists.

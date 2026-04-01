@@ -30,7 +30,7 @@ cmd_launch() {
 
   # Check base image exists
   if ! $LXC image alias list --format csv | grep -q "^${IMAGE},"; then
-    echo "Error: base image '$IMAGE' not found. Run 'ccbox init' first." >&2
+    echo "Error: base image '$IMAGE' not found. Run /setup to create the base image." >&2
     exit 1
   fi
 
