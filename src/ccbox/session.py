@@ -115,10 +115,15 @@ def create_session(
 
     # Inject env vars via tmux set-environment so they propagate to the
     # session shell without appearing in send-keys / scrollback.
-    for k, v in env.items():
+    # Batch into a single lxc exec to avoid per-call overhead (~0.2s each).
+    if env:
+        set_cmds = " && ".join(
+            f"tmux set-environment -t {shlex.quote(session_name)} {shlex.quote(k)} {shlex.quote(v)}"
+            for k, v in env.items()
+        )
         lxd.exec_cmd(
             container,
-            ["tmux", "set-environment", "-t", session_name, k, v],
+            ["sh", "-c", set_cmds],
             user=CONTAINER_USER,
         )
 
