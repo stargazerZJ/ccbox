@@ -10,7 +10,7 @@ from ccbox.config import Config, SESSION_LINK_DIR
 
 from ccbox.mount import add_mount, remove_mount, sync_auto_mounts
 from ccbox.sandbox import (
-    auto_sandbox_name_from_cwd,
+    auto_create_sandbox,
     create_sandbox,
     ensure_running,
     list_sandboxes,
@@ -38,6 +38,13 @@ from ccbox.session import (
     list_sessions,
 )
 from ccbox.transcript import read_session_info_any, relative_time
+from ccbox.picker import (
+    AttachSession,
+    MountToSandbox,
+    NewSandbox,
+    pick_no_resolve,
+    pick_session,
+)
 from ccbox import lxd
 
 
@@ -160,68 +167,42 @@ def cmd_resolve(config: Config, args: argparse.Namespace) -> None:
 def cmd_default(config: Config, args: argparse.Namespace) -> None:
     """Default command: find/create sandbox for CWD, manage sessions."""
     cwd = os.getcwd()
-
-    # Try to find existing sandbox for CWD
-    sandbox_name = config.sandbox_for_path(cwd)
-
-    if sandbox_name is None:
-        # Auto-create sandbox
-        sandbox_name = auto_sandbox_name_from_cwd()
-        # Check for collision
-        if config.get_sandbox(sandbox_name) is not None:
-            n = 1
-            while config.get_sandbox(f"{sandbox_name}-{n}") is not None:
-                n += 1
-            sandbox_name = f"{sandbox_name}-{n}"
-
-        print(f"Creating sandbox '{sandbox_name}' for {cwd}...")
-        create_sandbox(config, sandbox_name, mounts=[(cwd, False)])
-
-    container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
 
-    # Check for detached sessions
-    detached = detached_sessions(container)
+    sandbox_name = config.sandbox_for_path(cwd)
 
-    if len(detached) == 1:
-        # Reattach to the single detached session
-        info = _session_info(sandbox_name, detached[0]["name"])
-        if info and info["last_prompt"]:
-            prompt = info["last_prompt"]
-            if len(prompt) > 60:
-                prompt = prompt[:57] + "..."
-            ts = relative_time(info["timestamp"])
-            detail = f'"{prompt}"'
-            if ts:
-                detail += f"  {ts}"
-            print(f"Reattaching to session '{detached[0]['name']}'  {detail}")
+    if sandbox_name is not None:
+        # CWD resolves — use session picker within this sandbox
+        container = ensure_running(config, sandbox_name)
+        detached = detached_sessions(container)
+
+        chosen = pick_session(detached, sandbox_name)
+        if chosen is not None:
+            attach_session(container, chosen)
         else:
-            print(f"Reattaching to session '{detached[0]['name']}'...")
-        attach_session(container, detached[0]["name"])
-    elif len(detached) > 1:
-        # Show picker
-        print("Detached sessions:")
-        for i, s in enumerate(detached):
-            info = _session_info(sandbox_name, s["name"])
-            print(_format_session_line(i, s["name"], info))
-        print(f"  [n] New session")
-        choice = input("Select: ").strip()
-        if choice == "n":
             cmd = build_claude_command()
             name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
             attach_session(container, name)
-        else:
-            try:
-                idx = int(choice)
-                attach_session(container, detached[idx]["name"])
-            except (ValueError, IndexError):
-                print("Invalid selection.", file=sys.stderr)
-                raise SystemExit(1)
     else:
-        # No detached sessions — create new one
-        cmd = build_claude_command()
-        name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
-        attach_session(container, name)
+        # CWD doesn't resolve — show unified picker
+        result = pick_no_resolve(config, cwd)
+
+        if isinstance(result, AttachSession):
+            container = ensure_running(config, result.sandbox)
+            attach_session(container, result.session)
+        elif isinstance(result, NewSandbox):
+            sandbox_name = auto_create_sandbox(config, cwd)
+            container = ensure_running(config, sandbox_name)
+            cmd = build_claude_command()
+            name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
+            attach_session(container, name)
+        elif isinstance(result, MountToSandbox):
+            from ccbox.mount import add_mount
+            add_mount(config, result.sandbox, cwd, readonly=False)
+            container = ensure_running(config, result.sandbox)
+            cmd = build_claude_command()
+            name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=result.sandbox)
+            attach_session(container, name)
 
 
 def cmd_claude(config: Config, args: argparse.Namespace) -> None:
@@ -233,14 +214,7 @@ def cmd_claude(config: Config, args: argparse.Namespace) -> None:
     else:
         sandbox_name = config.sandbox_for_path(cwd)
         if sandbox_name is None:
-            sandbox_name = auto_sandbox_name_from_cwd()
-            if config.get_sandbox(sandbox_name) is not None:
-                n = 1
-                while config.get_sandbox(f"{sandbox_name}-{n}") is not None:
-                    n += 1
-                sandbox_name = f"{sandbox_name}-{n}"
-            print(f"Creating sandbox '{sandbox_name}' for {cwd}...")
-            create_sandbox(config, sandbox_name, mounts=[(cwd, False)])
+            sandbox_name = auto_create_sandbox(config, cwd)
 
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
@@ -262,14 +236,7 @@ def cmd_codex(config: Config, args: argparse.Namespace) -> None:
     else:
         sandbox_name = config.sandbox_for_path(cwd)
         if sandbox_name is None:
-            sandbox_name = auto_sandbox_name_from_cwd()
-            if config.get_sandbox(sandbox_name) is not None:
-                n = 1
-                while config.get_sandbox(f"{sandbox_name}-{n}") is not None:
-                    n += 1
-                sandbox_name = f"{sandbox_name}-{n}"
-            print(f"Creating sandbox '{sandbox_name}' for {cwd}...")
-            create_sandbox(config, sandbox_name, mounts=[(cwd, False)])
+            sandbox_name = auto_create_sandbox(config, cwd)
 
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)

@@ -6,7 +6,10 @@ build-backend = "hatchling.build"
 name = "ccbox"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "rich",
+    "inquirerpy",
+]
 
 [project.scripts]
 ccbox = "ccbox.__main__:main"

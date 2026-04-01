@@ -212,3 +212,16 @@ def auto_sandbox_name_from_cwd() -> str:
         if c.isalnum() or c in "-_":
             sanitized += c
     return sanitized or "default"
+
+
+def auto_create_sandbox(config: Config, cwd: str) -> str:
+    """Auto-create a sandbox named after cwd with it mounted rw. Returns sandbox name."""
+    name = auto_sandbox_name_from_cwd()
+    if config.get_sandbox(name) is not None:
+        n = 1
+        while config.get_sandbox(f"{name}-{n}") is not None:
+            n += 1
+        name = f"{name}-{n}"
+    print(f"Creating sandbox '{name}' for {cwd}...")
+    create_sandbox(config, name, mounts=[(cwd, False)])
+    return name
