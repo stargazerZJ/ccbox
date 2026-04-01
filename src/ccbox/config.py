@@ -54,7 +54,8 @@ class SandboxEntry:
         )
 
 
-RUN_DIR = STATE_DIR / "run"
+CACHE_DIR = Path.home() / ".cache" / "ccbox"
+RUN_DIR = CACHE_DIR / "run"
 SHIM_DIR = STATE_DIR / "bin"
 UV_SOCK = RUN_DIR / "uv.sock"
 SESSION_LINK_DIR = RUN_DIR / "session-links"
@@ -76,13 +77,13 @@ def _default_auto_mounts() -> list[MountEntry]:
         # uv shim → ~/.local/bin/uv inside the container
         MountEntry(path=str(SHIM_DIR / "uv"), mode="ro",
                    target=f"{home}/.local/bin/uv"),
-        # Socket directory for host↔container uv channel
+        # Socket directory for host↔container uv channel + session links
         MountEntry(path=str(RUN_DIR), mode="rw"),
         # Codex CLI (via nvm) — optional, only if nvm is installed
         MountEntry(path=f"{home}/.nvm", mode="ro", optional=True),
         MountEntry(path=f"{home}/.codex", mode="rw", optional=True),
-        # ccbox profile script (sourced by .bashrc)
-        MountEntry(path=f"{home}/.config/ccbox/profile.sh", mode="ro"),
+        # ccbox config (profile script, bin shims) — directory mount
+        MountEntry(path=f"{home}/.config/ccbox", mode="ro"),
     ]
 
 

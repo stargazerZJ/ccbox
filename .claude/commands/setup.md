@@ -220,3 +220,4 @@ codex_hooks = true
 - The `--reuse` flag on publish is needed if `ccbox-base` already exists.
 - The patched uv build takes a while (~5-15 min depending on hardware). Let the user know.
 - If the user provides extra instructions (apt mirrors, packages, config), incorporate them at the appropriate step.
+- If ccbox is installed as an editable package (`uv tool install -e .` or `pip install -e .`), the source directory must be added as a read-only auto-mount so it's accessible inside sandboxes: `ccbox config mounts add <source-dir> --ro`.
