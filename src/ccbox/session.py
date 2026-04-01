@@ -83,6 +83,7 @@ def create_session(
     env.setdefault("IS_SANDBOX", "1")
     if sandbox_name is not None:
         env.setdefault("CCBOX_SANDBOX", sandbox_name)
+    env.setdefault("CCBOX_TMUX_SESSION", session_name)
 
     # Ensure HOME is set — lxc exec with --env flags may not inherit it
     from pathlib import Path
@@ -97,8 +98,13 @@ def create_session(
     env.setdefault("CLAUDE_CONFIG_DIR", f"{env['HOME']}/.claude")
 
     # Always set UV_HARDLINK_SOCKET so patched uv defers hardlinks to host
-    from ccbox.config import UV_SOCK
+    from ccbox.config import UV_SOCK, SESSION_LINK_DIR
     env.setdefault("UV_HARDLINK_SOCKET", str(UV_SOCK))
+
+    # Clear stale session-link pointer (previous session in this tmux slot)
+    if sandbox_name is not None:
+        stale_link = SESSION_LINK_DIR / sandbox_name / session_name
+        stale_link.unlink(missing_ok=True)
 
     # Build tmux new-session command
     tmux_args = ["tmux", "-f", TMUX_CONF, "new-session", "-d", "-s", session_name]

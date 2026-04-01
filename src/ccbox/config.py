@@ -57,6 +57,7 @@ class SandboxEntry:
 RUN_DIR = STATE_DIR / "run"
 SHIM_DIR = STATE_DIR / "bin"
 UV_SOCK = RUN_DIR / "uv.sock"
+SESSION_LINK_DIR = RUN_DIR / "session-links"
 
 
 def _default_auto_mounts() -> list[MountEntry]:

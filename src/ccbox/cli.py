@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 
-from ccbox.config import Config
+from ccbox.config import Config, SESSION_LINK_DIR
 from ccbox.init import run_init
 from ccbox.mount import add_mount, remove_mount, sync_auto_mounts
 from ccbox.sandbox import (
@@ -37,6 +37,7 @@ from ccbox.session import (
     kill_session,
     list_sessions,
 )
+from ccbox.transcript import read_session_info, relative_time, format_size
 from ccbox import lxd
 
 
@@ -87,6 +88,62 @@ def resolve_session(container: str, name: str | None) -> str:
         raise ValueError("Invalid selection")
 
 
+def _session_info(sandbox_name: str, tmux_session: str) -> dict | None:
+    """Read session info for a tmux session via its session-link pointer."""
+    link_file = SESSION_LINK_DIR / sandbox_name / tmux_session
+    try:
+        transcript_path = link_file.read_text().strip()
+    except OSError:
+        return None
+    if not transcript_path:
+        return None
+    return read_session_info(transcript_path)
+
+
+def _format_session_line(index: int, tmux_name: str, info: dict | None, attached: bool = False) -> str:
+    """Format a single session line for the picker."""
+    status = "attached" if attached else "detached"
+    if info is None:
+        return f"  [{index}] {tmux_name} ({status})"
+    parts = []
+    if info["last_prompt"]:
+        prompt = info["last_prompt"]
+        if len(prompt) > 60:
+            prompt = prompt[:57] + "..."
+        parts.append(f'"{prompt}"')
+    ts = relative_time(info["timestamp"])
+    if ts:
+        parts.append(ts)
+    if info["git_branch"]:
+        parts.append(info["git_branch"])
+    parts.append(format_size(info["size_bytes"]))
+    detail = " · ".join(parts)
+    return f"  [{index}] {tmux_name} ({status})  {detail}"
+
+
+def cmd_session_link(config: Config, args: argparse.Namespace) -> None:
+    """Internal: called by Claude Code SessionStart hook to link tmux↔claude session."""
+    import json as _json
+    sandbox = os.environ.get("CCBOX_SANDBOX", "")
+    tmux_session = os.environ.get("CCBOX_TMUX_SESSION", "")
+    if not sandbox or not tmux_session:
+        return  # no-op outside ccbox containers
+
+    try:
+        hook_input = _json.load(sys.stdin)
+    except (_json.JSONDecodeError, ValueError):
+        return
+
+    transcript_path = hook_input.get("transcript_path", "")
+    if not transcript_path:
+        return
+
+    link_dir = SESSION_LINK_DIR / sandbox
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link_file = link_dir / tmux_session
+    link_file.write_text(transcript_path + "\n")
+
+
 def cmd_resolve(config: Config, args: argparse.Namespace) -> None:
     """Show which sandbox resolves for the current directory."""
     sandbox_name = resolve_sandbox(config, args.sandbox)
@@ -126,13 +183,25 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
 
     if len(detached) == 1:
         # Reattach to the single detached session
-        print(f"Reattaching to session '{detached[0]['name']}'...")
+        info = _session_info(sandbox_name, detached[0]["name"])
+        if info and info["last_prompt"]:
+            prompt = info["last_prompt"]
+            if len(prompt) > 60:
+                prompt = prompt[:57] + "..."
+            ts = relative_time(info["timestamp"])
+            detail = f'"{prompt}"'
+            if ts:
+                detail += f"  {ts}"
+            print(f"Reattaching to session '{detached[0]['name']}'  {detail}")
+        else:
+            print(f"Reattaching to session '{detached[0]['name']}'...")
         attach_session(container, detached[0]["name"])
     elif len(detached) > 1:
         # Show picker
         print("Detached sessions:")
         for i, s in enumerate(detached):
-            print(f"  [{i}] {s['name']}")
+            info = _session_info(sandbox_name, s["name"])
+            print(_format_session_line(i, s["name"], info))
         print(f"  [n] New session")
         choice = input("Select: ").strip()
         if choice == "n":
@@ -257,9 +326,9 @@ def cmd_sessions(config: Config, args: argparse.Namespace) -> None:
         return
 
     print(f"Sessions in sandbox '{sandbox_name}':")
-    for s in sessions:
-        status = "attached" if s["attached"] else "detached"
-        print(f"  {s['name']:<12} {status}")
+    for i, s in enumerate(sessions):
+        info = _session_info(sandbox_name, s["name"])
+        print(_format_session_line(i, s["name"], info, attached=s["attached"]))
 
 
 def cmd_attach(config: Config, args: argparse.Namespace) -> None:
@@ -682,6 +751,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--force", action="store_true", help="Rebuild existing base image")
     p_init.add_argument("--storage", metavar="POOL", help="LXD storage pool to use (saved for future sandboxes)")
 
+    # ccbox _session-link  (internal: Claude hook)
+    sub.add_parser("_session-link", help=argparse.SUPPRESS)
+
     return parser
 
 
@@ -706,6 +778,7 @@ COMMAND_MAP = {
     "resolve": cmd_resolve,
     "config": cmd_config,
     "init": cmd_init,
+    "_session-link": cmd_session_link,
 }
 
 

@@ -204,6 +204,14 @@ def run_init(force: bool = False, storage_pool: str | None = None) -> None:
         print(f"Publishing as '{BASE_IMAGE}'...")
         lxd.publish(TEMP_CONTAINER, BASE_IMAGE, force=force)
         print("Base image created successfully.")
+        print()
+        print("To enable session titles in the picker, add this hook to ~/.claude/settings.json:")
+        print()
+        print('  "hooks": {')
+        print('    "SessionStart": [{ "hooks": [{ "type": "command", "command": "ccbox _session-link" }] }]')
+        print('  }')
+        print()
+        print('Or ask Claude Code: "add a SessionStart hook that runs \'ccbox _session-link\'"')
 
     except KeyboardInterrupt:
         print("\nInterrupted. Cleaning up...")
