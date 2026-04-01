@@ -1,4 +1,4 @@
-"""Read Claude Code session transcript (.jsonl) files."""
+"""Read Claude Code and Codex session transcript (.jsonl) files."""
 
 from __future__ import annotations
 
@@ -10,12 +10,10 @@ from datetime import datetime, timezone
 def read_session_info(transcript_path: str) -> dict | None:
     """Extract last-prompt info from a Claude Code JSONL transcript.
 
-    Returns dict with keys: last_prompt, timestamp, git_branch, size_bytes.
+    Returns dict with keys: last_prompt, timestamp, git_branch, message_count.
     Returns None if the file doesn't exist or has no user messages.
     """
-    try:
-        size = os.path.getsize(transcript_path)
-    except OSError:
+    if not os.path.isfile(transcript_path):
         return None
 
     last_user_line = _find_last_user_line(transcript_path)
@@ -43,12 +41,98 @@ def read_session_info(transcript_path: str) -> dict | None:
             content = str(content[0]) if content else ""
     prompt = content[:80].replace("\n", " ").strip()
 
+    # Count user messages (forward scan, byte check only)
+    message_count = _count_user_messages(transcript_path)
+
     return {
         "last_prompt": prompt,
         "timestamp": entry.get("timestamp", ""),
         "git_branch": entry.get("gitBranch", ""),
-        "size_bytes": size,
+        "message_count": message_count,
     }
+
+
+def read_codex_session_info(transcript_path: str) -> dict | None:
+    """Extract last-prompt info from a Codex JSONL transcript.
+
+    Returns dict with keys: last_prompt, timestamp, git_branch, message_count.
+    Returns None if the file doesn't exist or has no user messages.
+    """
+    if not os.path.isfile(transcript_path):
+        return None
+
+    git_branch = ""
+    last_prompt = ""
+    last_timestamp = ""
+    message_count = 0
+
+    try:
+        with open(transcript_path, "rb") as f:
+            for line in f:
+                if b'"session_meta"' in line:
+                    try:
+                        entry = json.loads(line)
+                        git_info = entry.get("payload", {}).get("git", {})
+                        git_branch = git_info.get("branch", "")
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    continue
+
+                if not _is_codex_user_line(line):
+                    continue
+
+                try:
+                    entry = json.loads(line)
+                    content = entry.get("payload", {}).get("content", [])
+                    if not content:
+                        continue
+                    text = content[0].get("text", "") if isinstance(content[0], dict) else str(content[0])
+                    # Skip system-injected messages
+                    if text.startswith("# AGENTS") or text.startswith("<permissions"):
+                        continue
+                    message_count += 1
+                    last_prompt = text[:80].replace("\n", " ").strip()
+                    last_timestamp = entry.get("timestamp", "")
+                except (json.JSONDecodeError, ValueError, IndexError):
+                    continue
+    except OSError:
+        return None
+
+    if message_count == 0:
+        return None
+
+    return {
+        "last_prompt": last_prompt,
+        "timestamp": last_timestamp,
+        "git_branch": git_branch,
+        "message_count": message_count,
+    }
+
+
+def read_session_info_any(transcript_path: str) -> dict | None:
+    """Auto-detect transcript format and extract session info."""
+    try:
+        with open(transcript_path, "rb") as f:
+            first_line = f.readline()
+    except OSError:
+        return None
+
+    if b'"session_meta"' in first_line:
+        return read_codex_session_info(transcript_path)
+    return read_session_info(transcript_path)
+
+
+def _count_user_messages(path: str) -> int:
+    """Count real user prompt lines in a Claude Code transcript."""
+    count = 0
+    try:
+        with open(path, "rb") as f:
+            for line in f:
+                if _is_user_prompt_line(line):
+                    count += 1
+    except OSError:
+        pass
+    return count
 
 
 def _find_last_user_line(path: str) -> bytes | None:
@@ -96,6 +180,12 @@ def _is_user_prompt_line(line: bytes) -> bool:
             or b'"role": "user", "content": "' in line)
 
 
+def _is_codex_user_line(line: bytes) -> bool:
+    """Check if a Codex JSONL line is a user response_item."""
+    return (b'"response_item"' in line
+            and (b'"role":"user"' in line or b'"role": "user"' in line))
+
+
 def relative_time(iso_ts: str) -> str:
     """Convert ISO timestamp to relative time string like '2 min ago'."""
     if not iso_ts:
@@ -119,14 +209,3 @@ def relative_time(iso_ts: str) -> str:
         return f"{days} day{'s' if days != 1 else ''} ago"
     except (ValueError, TypeError):
         return ""
-
-
-def format_size(size_bytes: int) -> str:
-    """Format byte count as human-readable string."""
-    if size_bytes < 1024:
-        return f"{size_bytes}B"
-    kb = size_bytes / 1024
-    if kb < 1024:
-        return f"{kb:.1f}KB"
-    mb = kb / 1024
-    return f"{mb:.1f}MB"
