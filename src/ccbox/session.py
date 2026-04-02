@@ -70,12 +70,9 @@ def create_session(
 ) -> str:
     """Create a new tmux session inside the container.
 
-    Uses tmux new-session -d, then send-keys with exec so the command
-    replaces bash — exiting the command kills the tmux session.
+    All tmux operations are batched into a single lxc exec call
+    (~0.2s total instead of ~1.0s for 5 separate calls).
     """
-    if session_name is None:
-        session_name = next_session_name(container)
-
     if env is None:
         env = {}
 
@@ -83,7 +80,6 @@ def create_session(
     env.setdefault("IS_SANDBOX", "1")
     if sandbox_name is not None:
         env.setdefault("CCBOX_SANDBOX", sandbox_name)
-    env.setdefault("CCBOX_TMUX_SESSION", session_name)
 
     # Ensure HOME is set — lxc exec with --env flags may not inherit it
     from pathlib import Path
@@ -101,48 +97,84 @@ def create_session(
     from ccbox.config import UV_SOCK, SESSION_LINK_DIR
     env.setdefault("UV_HARDLINK_SOCKET", str(UV_SOCK))
 
-    # Clear stale session-link pointer (previous session in this tmux slot)
-    if sandbox_name is not None:
-        stale_link = SESSION_LINK_DIR / sandbox_name / session_name
-        stale_link.unlink(missing_ok=True)
-
-    # Build tmux new-session command
-    tmux_args = ["tmux", "-f", TMUX_CONF, "new-session", "-d", "-s", session_name]
-    if cwd:
-        tmux_args += ["-c", cwd]
-
-    lxd.exec_cmd(container, tmux_args, user=CONTAINER_USER, env=env)
-
-    # Inject env vars via tmux set-environment so they propagate to the
-    # session shell without appearing in send-keys / scrollback.
-    # Batch into a single lxc exec to avoid per-call overhead (~0.2s each).
-    if env:
-        set_cmds = " && ".join(
-            f"tmux set-environment -t {shlex.quote(session_name)} {shlex.quote(k)} {shlex.quote(v)}"
-            for k, v in env.items()
-        )
-        lxd.exec_cmd(
-            container,
-            ["sh", "-c", set_cmds],
-            user=CONTAINER_USER,
-        )
-
-    # Respawn the session pane so the shell picks up the new environment.
-    # respawn-pane -k kills the existing shell and starts a fresh one that
-    # inherits the tmux session environment we just set.
-    respawn = ["tmux", "respawn-pane", "-k", "-t", session_name]
-    if cwd:
-        respawn += ["-c", cwd]
-    lxd.exec_cmd(container, respawn, user=CONTAINER_USER)
-
-    # exec replaces bash with the command — when it exits, the tmux session ends.
-    lxd.exec_cmd(
-        container,
-        ["tmux", "send-keys", "-t", session_name, f"exec {command}", "Enter"],
-        user=CONTAINER_USER,
+    # CCBOX_TMUX_SESSION is set inside the script (depends on resolved name)
+    script = _build_session_script(
+        session_name=session_name,
+        cwd=cwd,
+        env=env,
+        command=command,
     )
 
-    return session_name
+    r = lxd.exec_cmd(
+        container,
+        ["sh", "-c", script],
+        user=CONTAINER_USER,
+        capture=True,
+    )
+
+    # Session name is the last line of output
+    name = r.stdout.strip().rsplit("\n", 1)[-1]
+
+    # Clear stale session-link pointer (previous session in this tmux slot)
+    if sandbox_name is not None:
+        (SESSION_LINK_DIR / sandbox_name / name).unlink(missing_ok=True)
+
+    return name
+
+
+def _build_session_script(
+    *,
+    session_name: str | None,
+    cwd: str | None,
+    env: dict[str, str],
+    command: str,
+) -> str:
+    """Build a shell script that creates and configures a tmux session.
+
+    Performs session name resolution, creation, env setup, pane respawn,
+    and command injection in one shot. Outputs the session name on stdout.
+    """
+    lines: list[str] = []
+
+    # Resolve session name
+    if session_name is not None:
+        lines.append(f"name={shlex.quote(session_name)}")
+    else:
+        lines.append(
+            'existing=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)\n'
+            'n=0\n'
+            'while printf "%s\\n" "$existing" | grep -qx "s-$n"; do n=$((n+1)); done\n'
+            'name="s-$n"'
+        )
+
+    # Create detached session
+    new_cmd = f"tmux -f {TMUX_CONF} new-session -d -s \"$name\""
+    if cwd:
+        new_cmd += f" -c {shlex.quote(cwd)}"
+    lines.append(new_cmd)
+
+    # Inject env vars via tmux set-environment (includes CCBOX_TMUX_SESSION)
+    env["CCBOX_TMUX_SESSION"] = "$name"  # resolved by the shell
+    for k, v in env.items():
+        if v == "$name":
+            lines.append(f'tmux set-environment -t "$name" {shlex.quote(k)} "$name"')
+        else:
+            lines.append(f'tmux set-environment -t "$name" {shlex.quote(k)} {shlex.quote(v)}')
+    del env["CCBOX_TMUX_SESSION"]  # don't mutate caller's dict permanently
+
+    # Respawn pane so the shell picks up the tmux session environment
+    respawn = 'tmux respawn-pane -k -t "$name"'
+    if cwd:
+        respawn += f" -c {shlex.quote(cwd)}"
+    lines.append(respawn)
+
+    # exec replaces bash — exiting the command kills the tmux session
+    lines.append(f'tmux send-keys -t "$name" {shlex.quote(f"exec {command}")} Enter')
+
+    # Output session name for the caller to parse
+    lines.append('printf "%s" "$name"')
+
+    return "\n".join(lines)
 
 
 def attach_session(container: str, session_name: str) -> None:
