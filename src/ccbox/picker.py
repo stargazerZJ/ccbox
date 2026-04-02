@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from rich.console import Console
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.widgets import OptionList
+from textual.widgets import Input, OptionList
 from textual.widgets.option_list import Option
 
 from ccbox import lxd
@@ -32,7 +32,7 @@ class AttachSession:
 @dataclass
 class NewSandbox:
     """Create a new sandbox for CWD."""
-    pass
+    name: str
 
 
 @dataclass
@@ -183,6 +183,51 @@ def _run_picker(options: list[Option | None], shortcuts: dict[str, str] | None =
     return app.run(inline=True)
 
 
+class _NameInputApp(App[str | None]):
+    """Inline app that prompts for a sandbox name."""
+
+    CSS = """
+    Input {
+        height: 1;
+        background: $surface;
+        border: none;
+        padding: 0;
+        margin: 0;
+    }
+    Input:focus {
+        border: none;
+    }
+    """
+
+    def __init__(self, default: str) -> None:
+        super().__init__()
+        self._default = default
+
+    def compose(self) -> ComposeResult:
+        yield Input(value=self._default, placeholder="sandbox name")
+
+    def on_mount(self) -> None:
+        inp = self.query_one(Input)
+        inp.cursor_position = len(inp.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        value = event.value.strip()
+        if value:
+            self.exit(value)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.prevent_default()
+            self.exit(None)
+
+
+def _prompt_sandbox_name(default: str) -> str | None:
+    """Prompt for a sandbox name with a pre-filled default. Returns name or None on escape."""
+    console.print("[bold]Sandbox name[/bold] [dim](Enter to confirm, Esc to go back)[/dim]")
+    app = _NameInputApp(default)
+    return app.run(inline=True)
+
+
 # -- Pickers --
 
 def pick_session(sessions: list[dict], sandbox_name: str) -> str | None:
@@ -327,7 +372,12 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
             _, sandbox, session = result.split(":", 2)
             return AttachSession(sandbox=sandbox, session=session)
         elif result == "new":
-            return NewSandbox()
+            from ccbox.sandbox import auto_sandbox_name_from_cwd
+            default_name = auto_sandbox_name_from_cwd()
+            name = _prompt_sandbox_name(default_name)
+            if name is None:
+                continue  # back to menu
+            return NewSandbox(name=name)
         elif result in ("mount", "mount_ro"):
             readonly = result == "mount_ro"
             mount_result = _pick_sandbox_for_mount(config, readonly=readonly)

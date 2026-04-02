@@ -10,7 +10,6 @@ from ccbox.config import Config, SESSION_LINK_DIR
 
 from ccbox.mount import add_mount, remove_mount, sync_auto_mounts
 from ccbox.sandbox import (
-    auto_create_sandbox,
     create_sandbox,
     ensure_running,
     list_sandboxes,
@@ -200,7 +199,16 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
             container = ensure_running(config, result.sandbox)
             attach_session(container, result.session)
         elif isinstance(result, NewSandbox):
-            sandbox_name = auto_create_sandbox(config, cwd)
+            sandbox_name = result.name
+            # Deduplicate name if it already exists
+            base_name = sandbox_name
+            if config.get_sandbox(sandbox_name) is not None:
+                n = 1
+                while config.get_sandbox(f"{base_name}-{n}") is not None:
+                    n += 1
+                sandbox_name = f"{base_name}-{n}"
+            print(f"Creating sandbox '{sandbox_name}' for {cwd}...")
+            create_sandbox(config, sandbox_name, mounts=[(cwd, False)])
             container = ensure_running(config, sandbox_name)
             cmd = build_claude_command()
             name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
@@ -262,8 +270,12 @@ def cmd_ls(config: Config, args: argparse.Namespace) -> None:
 
 def cmd_create(config: Config, args: argparse.Namespace) -> None:
     """Create a new sandbox."""
-    create_sandbox(config, args.name)
+    cwd = os.getcwd()
+    mounts = None if args.bare else [(cwd, False)]
+    create_sandbox(config, args.name, mounts=mounts)
     print(f"Sandbox '{args.name}' created.")
+    if not args.bare:
+        print(f"Mounted '{cwd}' (rw).")
 
 
 def cmd_mount(config: Config, args: argparse.Namespace) -> None:
@@ -646,9 +658,11 @@ def build_parser() -> argparse.ArgumentParser:
     # ccbox ls
     sub.add_parser("ls", help="List sandboxes")
 
-    # ccbox create <name>
+    # ccbox create <name> [--bare]
     p_create = sub.add_parser("create", help="Create a sandbox")
     p_create.add_argument("name", help="Sandbox name")
+    p_create.add_argument("--bare", action="store_true",
+                          help="Don't mount current directory (use ccbox mount -s NAME later)")
 
     # ccbox mount <path> [-s SANDBOX] [--ro]
     p_mount = sub.add_parser("mount", help="Add a mount")
