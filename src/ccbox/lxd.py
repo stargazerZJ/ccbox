@@ -114,8 +114,16 @@ def add_disk_device(
     readonly: bool = False,
     shift: bool = False,
 ) -> None:
-    args = ["config", "device", "add", container, dev_name, "disk",
-            f"source={source}", f"path={path}"]
+    args = [
+        "config",
+        "device",
+        "add",
+        container,
+        dev_name,
+        "disk",
+        f"source={source}",
+        f"path={path}",
+    ]
     if readonly:
         args.append("readonly=true")
     if shift:
@@ -179,8 +187,15 @@ def add_proxy_device(
         bind: "host" (listen on host) or "instance" (listen in container)
     """
     run_lxc(
-        "config", "device", "add", container, dev_name, "proxy",
-        f"listen={listen}", f"connect={connect}", f"bind={bind}",
+        "config",
+        "device",
+        "add",
+        container,
+        dev_name,
+        "proxy",
+        f"listen={listen}",
+        f"connect={connect}",
+        f"bind={bind}",
     )
 
 
@@ -193,6 +208,7 @@ def list_devices(container: str) -> dict:
     r = run_lxc("config", "device", "show", container, capture=True)
     # Output is YAML — parse minimally to avoid pyyaml dependency
     import re
+
     devices: dict[str, dict[str, str]] = {}
     current: str | None = None
     for line in r.stdout.splitlines():

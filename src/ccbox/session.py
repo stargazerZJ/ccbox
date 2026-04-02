@@ -18,7 +18,12 @@ def list_sessions(container: str) -> list[dict]:
     """
     r = lxd.exec_cmd(
         container,
-        ["tmux", "list-sessions", "-F", "#{session_name}|#{session_attached}|#{session_created}"],
+        [
+            "tmux",
+            "list-sessions",
+            "-F",
+            "#{session_name}|#{session_attached}|#{session_created}",
+        ],
         user=CONTAINER_USER,
         capture=True,
         check=False,
@@ -29,11 +34,13 @@ def list_sessions(container: str) -> list[dict]:
     for line in r.stdout.strip().splitlines():
         parts = line.split("|", 2)
         if len(parts) == 3:
-            sessions.append({
-                "name": parts[0],
-                "attached": int(parts[1]) > 0,
-                "created": parts[2],
-            })
+            sessions.append(
+                {
+                    "name": parts[0],
+                    "attached": int(parts[1]) > 0,
+                    "created": parts[2],
+                }
+            )
     return sessions
 
 
@@ -83,10 +90,12 @@ def create_session(
 
     # Ensure HOME is set — lxc exec with --env flags may not inherit it
     from pathlib import Path
+
     env.setdefault("HOME", str(Path.home()))
 
     # Login identity vars — tools like git and claude expect these
     import getpass
+
     env.setdefault("USER", getpass.getuser())
     env.setdefault("LOGNAME", env["USER"])
 
@@ -94,7 +103,8 @@ def create_session(
     env.setdefault("CLAUDE_CONFIG_DIR", f"{env['HOME']}/.claude")
 
     # Always set UV_HARDLINK_SOCKET so patched uv defers hardlinks to host
-    from ccbox.config import UV_SOCK, SESSION_LINK_DIR
+    from ccbox.config import SESSION_LINK_DIR, UV_SOCK
+
     env.setdefault("UV_HARDLINK_SOCKET", str(UV_SOCK))
 
     # CCBOX_TMUX_SESSION is set inside the script (depends on resolved name)
@@ -142,13 +152,13 @@ def _build_session_script(
     else:
         lines.append(
             'existing=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)\n'
-            'n=0\n'
+            "n=0\n"
             'while printf "%s\\n" "$existing" | grep -qx "s-$n"; do n=$((n+1)); done\n'
             'name="s-$n"'
         )
 
     # Create detached session
-    new_cmd = f"tmux -f {TMUX_CONF} new-session -d -s \"$name\""
+    new_cmd = f'tmux -f {TMUX_CONF} new-session -d -s "$name"'
     if cwd:
         new_cmd += f" -c {shlex.quote(cwd)}"
     lines.append(new_cmd)
@@ -220,6 +230,7 @@ def _find_codex() -> str | None:
     """Find the codex binary — check nvm, then PATH."""
     import glob
     import shutil
+
     # Prefer nvm-installed codex (we know the node version to pair with)
     matches = glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/codex"))
     if matches:

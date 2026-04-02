@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import importlib.resources
 import os
 import sys
 
-import importlib.resources
-
 from ccbox import lxd
 from ccbox.config import Config, SandboxEntry
-from ccbox.mount import add_auto_mounts, add_mount, ensure_uv_shim, ensure_profile_script, fix_mount_parents, prune_stale_mounts
+from ccbox.mount import (
+    add_auto_mounts,
+    add_mount,
+    ensure_profile_script,
+    ensure_uv_shim,
+    fix_mount_parents,
+    prune_stale_mounts,
+)
 from ccbox.session import list_sessions
 from ccbox.uv_server import ensure_server_running
 
@@ -22,6 +28,7 @@ def _push_known_hosts(cname: str) -> None:
     """Push bundled SSH known_hosts into the container."""
     import tempfile
     from pathlib import Path
+
     home = str(Path.home())
     asset_ref = importlib.resources.files("ccbox").parent.parent / "assets" / "ssh_known_hosts"
     content = asset_ref.read_text()
@@ -60,7 +67,10 @@ def create_sandbox(
         raise ValueError(f"Sandbox '{name}' already exists")
 
     if not lxd.image_exists(BASE_IMAGE):
-        print("Base image not found. Run /setup to create the base image.", file=sys.stderr)
+        print(
+            "Base image not found. Run /setup to create the base image.",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
 
     # Ensure uv shim, profile script, and server are ready before creating container
@@ -155,17 +165,21 @@ def list_sandboxes(config: Config) -> list[dict]:
         sessions = 0
         if state == "Running":
             sessions = len(list_sessions(entry.container))
-        result.append({
-            "name": name,
-            "container": entry.container,
-            "state": state,
-            "sessions": sessions,
-            "mounts": len(entry.mounts),
-        })
+        result.append(
+            {
+                "name": name,
+                "container": entry.container,
+                "state": state,
+                "sessions": sessions,
+                "mounts": len(entry.mounts),
+            }
+        )
     # Clean up stale entries
     for name in stale:
-        print(f"Warning: sandbox '{name}' container no longer exists. Removing from config.",
-              file=sys.stderr)
+        print(
+            f"Warning: sandbox '{name}' container no longer exists. Removing from config.",
+            file=sys.stderr,
+        )
         config.remove_sandbox(name)
     return result
 

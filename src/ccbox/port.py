@@ -90,10 +90,12 @@ def list_ports(container: str) -> list[dict]:
         connect = props.get("connect", "")
         bind = props.get("bind", "host")
         direction = "expose" if bind == "host" else "forward"
-        result.append({
-            "name": name,
-            "direction": direction,
-            "listen": listen,
-            "connect": connect,
-        })
+        result.append(
+            {
+                "name": name,
+                "direction": direction,
+                "listen": listen,
+                "connect": connect,
+            }
+        )
     return result

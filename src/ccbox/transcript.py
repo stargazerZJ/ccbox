@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def read_session_info(transcript_path: str) -> dict | None:
@@ -86,7 +86,11 @@ def read_codex_session_info(transcript_path: str) -> dict | None:
                     content = entry.get("payload", {}).get("content", [])
                     if not content:
                         continue
-                    text = content[0].get("text", "") if isinstance(content[0], dict) else str(content[0])
+                    text = (
+                        content[0].get("text", "")
+                        if isinstance(content[0], dict)
+                        else str(content[0])
+                    )
                     # Skip system-injected messages
                     if text.startswith("# AGENTS") or text.startswith("<permissions"):
                         continue
@@ -176,14 +180,12 @@ def _is_user_prompt_line(line: bytes) -> bool:
     # Tool results have message.content as a list:
     #   "role":"user","content":[{"type":"tool_result",...}]
     # Match the message-level content field (not nested tool_result content).
-    return (b'"role":"user","content":"' in line
-            or b'"role": "user", "content": "' in line)
+    return b'"role":"user","content":"' in line or b'"role": "user", "content": "' in line
 
 
 def _is_codex_user_line(line: bytes) -> bool:
     """Check if a Codex JSONL line is a user response_item."""
-    return (b'"response_item"' in line
-            and (b'"role":"user"' in line or b'"role": "user"' in line))
+    return b'"response_item"' in line and (b'"role":"user"' in line or b'"role": "user"' in line)
 
 
 def relative_time(iso_ts: str) -> str:
@@ -192,7 +194,7 @@ def relative_time(iso_ts: str) -> str:
         return ""
     try:
         dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         delta = now - dt
         secs = int(delta.total_seconds())
         if secs < 0:

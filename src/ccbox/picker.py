@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 from rich.console import Console
 from rich.text import Text
@@ -13,7 +13,7 @@ from textual.widgets import Input, OptionList
 from textual.widgets.option_list import Option
 
 from ccbox import lxd
-from ccbox.config import Config, SESSION_LINK_DIR
+from ccbox.config import SESSION_LINK_DIR, Config
 from ccbox.session import list_sessions
 from ccbox.transcript import read_session_info_any, relative_time
 
@@ -22,9 +22,11 @@ console = Console()
 
 # -- Result types for pick_no_resolve --
 
+
 @dataclass
 class AttachSession:
     """Resume an existing session in a specific sandbox."""
+
     sandbox: str
     session: str
 
@@ -32,12 +34,14 @@ class AttachSession:
 @dataclass
 class NewSandbox:
     """Create a new sandbox for CWD."""
+
     name: str
 
 
 @dataclass
 class MountToSandbox:
     """Mount CWD into an existing sandbox and start a session."""
+
     sandbox: str
     readonly: bool = False
 
@@ -46,6 +50,7 @@ PickResult = AttachSession | NewSandbox | MountToSandbox
 
 
 # -- Session info helpers --
+
 
 @dataclass
 class RecentSession:
@@ -100,7 +105,14 @@ def _parse_timestamp(info: dict | None) -> float:
         return 0.0
 
 
-def _styled_option(primary: str, detail: str = "", *, prefix: str = "", key: str = "", dim_primary: bool = False) -> Text:
+def _styled_option(
+    primary: str,
+    detail: str = "",
+    *,
+    prefix: str = "",
+    key: str = "",
+    dim_primary: bool = False,
+) -> Text:
     """Build a Rich Text with optional dim detail and key hint."""
     t = Text()
     if key:
@@ -114,6 +126,7 @@ def _styled_option(primary: str, detail: str = "", *, prefix: str = "", key: str
 
 
 # -- Inline picker app --
+
 
 class _PickerApp(App[str | None]):
     """Generic inline picker. Subclass or instantiate with options."""
@@ -131,7 +144,9 @@ class _PickerApp(App[str | None]):
     }
     """
 
-    def __init__(self, options: list[Option | None], shortcuts: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, options: list[Option | None], shortcuts: dict[str, str] | None = None
+    ) -> None:
         super().__init__()
         self._options = options
         self._shortcuts = shortcuts or {}
@@ -162,7 +177,12 @@ class _PickerApp(App[str | None]):
         self.exit(event.option.id)
 
 
-def _run_picker(options: list[Option | None], shortcuts: dict[str, str] | None = None, *, numbered: bool = True) -> str | None:
+def _run_picker(
+    options: list[Option | None],
+    shortcuts: dict[str, str] | None = None,
+    *,
+    numbered: bool = True,
+) -> str | None:
     """Run an inline picker and return the selected option id.
 
     If numbered=True, selectable options get 1-9 digit prefixes and shortcuts.
@@ -176,7 +196,9 @@ def _run_picker(options: list[Option | None], shortcuts: dict[str, str] | None =
                 idx += 1
                 labeled = Text()
                 labeled.append(f"{idx} ", style="dim")
-                labeled.append_text(opt.prompt if isinstance(opt.prompt, Text) else Text(str(opt.prompt)))
+                labeled.append_text(
+                    opt.prompt if isinstance(opt.prompt, Text) else Text(str(opt.prompt))
+                )
                 options[i] = Option(labeled, id=opt.id)
                 all_shortcuts[str(idx)] = opt.id
     app = _PickerApp(options, all_shortcuts)
@@ -230,6 +252,7 @@ def _prompt_sandbox_name(default: str) -> str | None:
 
 # -- Pickers --
 
+
 def pick_session(sessions: list[dict], sandbox_name: str) -> str | None:
     """Interactive picker for sessions within a resolved sandbox.
 
@@ -259,7 +282,11 @@ def pick_session(sessions: list[dict], sandbox_name: str) -> str | None:
         detail = _format_detail(info)
         name = s["name"].ljust(max_name)
         if s["attached"]:
-            prompt = _styled_option(name, f"(attached)  {detail}" if detail else "(attached)", dim_primary=bool(detail))
+            prompt = _styled_option(
+                name,
+                f"(attached)  {detail}" if detail else "(attached)",
+                dim_primary=bool(detail),
+            )
         else:
             prompt = _styled_option(name, detail, dim_primary=bool(detail))
         options.append(Option(prompt, id=s["name"]))
@@ -300,13 +327,15 @@ def _collect_recent_sessions(config: Config) -> list[RecentSession]:
             if tmux_name not in live_sessions:
                 continue
             info = _session_info(sandbox_name, tmux_name)
-            results.append(RecentSession(
-                sandbox=sandbox_name,
-                tmux_name=tmux_name,
-                container=entry.container,
-                info=info,
-                attached=live_sessions[tmux_name],
-            ))
+            results.append(
+                RecentSession(
+                    sandbox=sandbox_name,
+                    tmux_name=tmux_name,
+                    container=entry.container,
+                    info=info,
+                    attached=live_sessions[tmux_name],
+                )
+            )
 
     # Sort by recency (most recent first)
     results.sort(key=lambda r: _parse_timestamp(r.info), reverse=True)
@@ -336,34 +365,47 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
                 if r.attached:
                     detail = f"(attached)  {detail}" if detail else "(attached)"
                 oid = f"attach:{r.sandbox}:{r.tmux_name}"
-                prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail, key=str(idx + 1), dim_primary=bool(detail))
+                prompt = _styled_option(
+                    f"{r.sandbox}/{r.tmux_name}",
+                    detail,
+                    key=str(idx + 1),
+                    dim_primary=bool(detail),
+                )
                 options.append(Option(prompt, id=oid))
                 if idx < 9:
                     shortcuts[str(idx + 1)] = oid
 
         # Actions
         options.append(None)
-        options.append(Option(
-            _styled_option(f"New sandbox for {dirname}/", key="n"),
-            id="new",
-        ))
+        options.append(
+            Option(
+                _styled_option(f"New sandbox for {dirname}/", key="n"),
+                id="new",
+            )
+        )
 
         if sandboxes:
-            options.append(Option(
-                _styled_option("Mount to existing sandbox\u2026", key="m"),
-                id="mount",
-            ))
+            options.append(
+                Option(
+                    _styled_option("Mount to existing sandbox\u2026", key="m"),
+                    id="mount",
+                )
+            )
             shortcuts["m"] = "mount"
-            options.append(Option(
-                _styled_option("Mount to existing sandbox (read-only)\u2026", key="r"),
-                id="mount_ro",
-            ))
+            options.append(
+                Option(
+                    _styled_option("Mount to existing sandbox (read-only)\u2026", key="r"),
+                    id="mount_ro",
+                )
+            )
             shortcuts["r"] = "mount_ro"
 
-        options.append(Option(
-            _styled_option("Quit", key="q"),
-            id="__quit__",
-        ))
+        options.append(
+            Option(
+                _styled_option("Quit", key="q"),
+                id="__quit__",
+            )
+        )
         result = _run_picker(options, shortcuts, numbered=False)
 
         if result in (None, "__back__", "__quit__"):
@@ -373,6 +415,7 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
             return AttachSession(sandbox=sandbox, session=session)
         elif result == "new":
             from ccbox.sandbox import auto_sandbox_name_from_cwd
+
             default_name = auto_sandbox_name_from_cwd()
             name = _prompt_sandbox_name(default_name)
             if name is None:

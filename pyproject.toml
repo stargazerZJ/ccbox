@@ -13,3 +13,11 @@ dependencies = [
 
 [project.scripts]
 ccbox = "ccbox.__main__:main"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["SIM102", "SIM105"]

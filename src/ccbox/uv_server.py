@@ -134,7 +134,9 @@ def run_server() -> None:
         while True:
             conn, _ = sock.accept()
             threading.Thread(
-                target=_handle_client, args=(conn, dst_prefixes), daemon=True,
+                target=_handle_client,
+                args=(conn, dst_prefixes),
+                daemon=True,
             ).start()
     except OSError:
         pass  # socket closed by signal handler
@@ -181,6 +183,7 @@ def ensure_server_running() -> None:
         os.waitpid(pid, 0)
         # Brief wait for the socket to appear
         import time
+
         for _ in range(20):
             if UV_SOCK.exists():
                 return

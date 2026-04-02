@@ -9,7 +9,7 @@ import stat
 import sys
 
 from ccbox import lxd
-from ccbox.config import Config, MountEntry, SHIM_DIR
+from ccbox.config import SHIM_DIR, Config, MountEntry
 
 
 def device_name_from_path(path: str) -> str:
@@ -48,7 +48,8 @@ def _container_ino(container: str, path: str) -> int | None:
     r = lxd.exec_cmd(
         container,
         ["stat", "-c", "%i", path],
-        capture=True, check=False,
+        capture=True,
+        check=False,
     )
     if r.returncode == 0:
         try:
@@ -88,11 +89,12 @@ def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
                 pass  # device may already be gone
             mode_flag = " --ro" if m.mode == "ro" else ""
             pruned.append(m.path)
-            print(f"Removing stale mount: {m.path} ({reason})",
-                  file=sys.stderr)
+            print(f"Removing stale mount: {m.path} ({reason})", file=sys.stderr)
             if os.path.exists(m.path):
-                print(f"  Re-add: ccbox mount {sandbox_name} {m.path}{mode_flag}",
-                      file=sys.stderr)
+                print(
+                    f"  Re-add: ccbox mount {sandbox_name} {m.path}{mode_flag}",
+                    file=sys.stderr,
+                )
         else:
             keep.append(m)
 
@@ -128,8 +130,12 @@ def add_mount(
         _warn_file_mount(resolved)
 
     lxd.add_disk_device(
-        entry.container, dev_name, resolved, resolved,
-        readonly=readonly, shift=True,
+        entry.container,
+        dev_name,
+        resolved,
+        resolved,
+        readonly=readonly,
+        shift=True,
     )
 
     entry.mounts = [m for m in entry.mounts if os.path.realpath(m.path) != resolved]
@@ -214,9 +220,7 @@ def _normalize_mount(m: MountEntry) -> MountEntry | None:
     mount_real = os.path.realpath(m.path)
 
     # .claude.json is rewritten atomically by claude; file mounts break rename().
-    if m.target is None and (
-        m.path == claude_json or mount_real == os.path.realpath(claude_json)
-    ):
+    if m.target is None and (m.path == claude_json or mount_real == os.path.realpath(claude_json)):
         print(
             "Warning: skipping auto-mount for ~/.claude.json; "
             "file mounts block atomic writes and can hang Claude startup.",
@@ -225,9 +229,7 @@ def _normalize_mount(m: MountEntry) -> MountEntry | None:
         return None
 
     # Preserve claude symlink semantics by mounting ~/.local/bin instead.
-    if m.target is None and (
-        m.path == claude_link or mount_real == os.path.realpath(claude_link)
-    ):
+    if m.target is None and (m.path == claude_link or mount_real == os.path.realpath(claude_link)):
         return MountEntry(path=f"{home}/.local/bin", mode=m.mode)
 
     return m
@@ -243,6 +245,7 @@ def fix_mount_parents(container: str, config: Config | None = None) -> None:
         mounts = config.state.get_auto_mounts()
     else:
         from ccbox.config import _default_auto_mounts
+
         mounts = _default_auto_mounts()
 
     # Collect unique parent dirs that need fixing
@@ -264,7 +267,6 @@ def fix_mount_parents(container: str, config: Config | None = None) -> None:
         ["sh", "-c", f"chown -f 1000:1000 {dirs}; chmod -f 755 {dirs}"],
         check=False,
     )
-
 
 
 def sync_auto_mounts(
@@ -335,8 +337,12 @@ def sync_auto_mounts(
                     else:
                         os.makedirs(source, exist_ok=True)
                 lxd.add_disk_device(
-                    container, dev_name, source, target,
-                    readonly=readonly, shift=True,
+                    container,
+                    dev_name,
+                    source,
+                    target,
+                    readonly=readonly,
+                    shift=True,
                 )
         else:
             needs_readd = False
@@ -368,8 +374,12 @@ def sync_auto_mounts(
                 if not dry_run:
                     lxd.remove_disk_device(container, dev_name)
                     lxd.add_disk_device(
-                        container, dev_name, source, target,
-                        readonly=readonly, shift=True,
+                        container,
+                        dev_name,
+                        source,
+                        target,
+                        readonly=readonly,
+                        shift=True,
                     )
 
     # 2. Remove stale auto-mount devices (in LXD but no longer in config)
@@ -403,6 +413,7 @@ def add_auto_mounts(container: str, config: Config | None = None) -> None:
         mounts = config.state.get_auto_mounts()
     else:
         from ccbox.config import _default_auto_mounts
+
         mounts = _default_auto_mounts()
 
     seen_targets: set[str] = set()
@@ -431,6 +442,10 @@ def add_auto_mounts(container: str, config: Config | None = None) -> None:
 
         dev_name = device_name_from_path(target)
         lxd.add_disk_device(
-            container, dev_name, source, target,
-            readonly=(m.mode == "ro"), shift=True,
+            container,
+            dev_name,
+            source,
+            target,
+            readonly=(m.mode == "ro"),
+            shift=True,
         )

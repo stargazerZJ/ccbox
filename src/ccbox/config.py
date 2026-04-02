@@ -13,11 +13,11 @@ STATE_FILE = STATE_DIR / "state.json"
 
 @dataclass
 class MountEntry:
-    path: str            # source path on host
-    mode: str            # "rw" or "ro"
+    path: str  # source path on host
+    mode: str  # "rw" or "ro"
     target: str | None = None  # target path in container (None = same as path)
-    optional: bool = False     # if True, skip when source doesn't exist
-    inode: str | None = None   # "dev:ino" at mount time — detects path replaced by different dir
+    optional: bool = False  # if True, skip when source doesn't exist
+    inode: str | None = None  # "dev:ino" at mount time — detects path replaced by different dir
 
     def to_dict(self) -> dict:
         d: dict = {"path": self.path, "mode": self.mode}
@@ -31,8 +31,13 @@ class MountEntry:
 
     @classmethod
     def from_dict(cls, d: dict) -> MountEntry:
-        return cls(path=d["path"], mode=d["mode"], target=d.get("target"),
-                   optional=d.get("optional", False), inode=d.get("inode"))
+        return cls(
+            path=d["path"],
+            mode=d["mode"],
+            target=d.get("target"),
+            optional=d.get("optional", False),
+            inode=d.get("inode"),
+        )
 
 
 @dataclass
@@ -75,8 +80,7 @@ def _default_auto_mounts() -> list[MountEntry]:
         MountEntry(path=f"{home}/.local/share/uv", mode="rw"),
         MountEntry(path=f"{home}/.config/uv", mode="ro"),
         # uv shim → ~/.local/bin/uv inside the container
-        MountEntry(path=str(SHIM_DIR / "uv"), mode="ro",
-                   target=f"{home}/.local/bin/uv"),
+        MountEntry(path=str(SHIM_DIR / "uv"), mode="ro", target=f"{home}/.local/bin/uv"),
         # Socket directory for host↔container uv channel + session links
         MountEntry(path=str(RUN_DIR), mode="rw"),
         # Codex CLI (via nvm) — optional, only if nvm is installed
@@ -243,8 +247,7 @@ class Config:
         resolved = os.path.realpath(path)
         # Replace if same path exists
         self._state.auto_mounts = [
-            m for m in self._state.auto_mounts
-            if os.path.realpath(m.path) != resolved
+            m for m in self._state.auto_mounts if os.path.realpath(m.path) != resolved
         ]
         self._state.auto_mounts.append(MountEntry(path=resolved, mode=mode))
         self.save()
@@ -254,8 +257,7 @@ class Config:
         resolved = os.path.realpath(path)
         before = len(self._state.auto_mounts)
         self._state.auto_mounts = [
-            m for m in self._state.auto_mounts
-            if os.path.realpath(m.path) != resolved
+            m for m in self._state.auto_mounts if os.path.realpath(m.path) != resolved
         ]
         if len(self._state.auto_mounts) == before:
             return False

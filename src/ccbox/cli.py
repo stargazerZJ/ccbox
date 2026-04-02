@@ -6,9 +6,24 @@ import argparse
 import os
 import sys
 
-from ccbox.config import Config, SESSION_LINK_DIR
-
+from ccbox import lxd
+from ccbox.config import SESSION_LINK_DIR, Config
 from ccbox.mount import add_mount, remove_mount, sync_auto_mounts
+from ccbox.picker import (
+    AttachSession,
+    MountToSandbox,
+    NewSandbox,
+    pick_no_resolve,
+    pick_session,
+    pick_session_all,
+)
+from ccbox.port import (
+    _parse_addr_port,
+    add_expose,
+    add_forward,
+    list_ports,
+    remove_port,
+)
 from ccbox.sandbox import (
     create_sandbox,
     ensure_running,
@@ -18,45 +33,32 @@ from ccbox.sandbox import (
     sandbox_status,
     stop_sandbox,
 )
-from ccbox.port import (
-    add_expose,
-    add_forward,
-    list_ports,
-    remove_port,
-    _parse_addr_port,
-)
 from ccbox.session import (
     attach_session,
     build_claude_command,
     build_codex_command,
     create_session,
-    list_sessions,
     get_forwarded_env,
     kill_all_sessions,
     kill_session,
+    list_sessions,
 )
 from ccbox.transcript import read_session_info_any, relative_time
-from ccbox.picker import (
-    AttachSession,
-    MountToSandbox,
-    NewSandbox,
-    pick_no_resolve,
-    pick_session,
-    pick_session_all,
-)
-from ccbox import lxd
 
 
 def check_lxd_group() -> None:
     """Check if the current user is in the lxd group."""
     import grp
+
     try:
         lxd_group = grp.getgrnam("lxd")
         import getpass
+
         username = getpass.getuser()
         if username not in lxd_group.gr_mem:
             # Also check primary group
             import pwd
+
             pw = pwd.getpwnam(username)
             if pw.pw_gid != lxd_group.gr_gid:
                 print("Error: Your user is not in the 'lxd' group.", file=sys.stderr)
@@ -99,8 +101,8 @@ def resolve_session(container: str, name: str | None) -> str:
     choice = input("Select session: ").strip()
     try:
         return sessions[int(choice)]["name"]
-    except (ValueError, IndexError):
-        raise ValueError("Invalid selection")
+    except (ValueError, IndexError) as e:
+        raise ValueError("Invalid selection") from e
 
 
 def _session_info(sandbox_name: str, tmux_session: str) -> dict | None:
@@ -115,7 +117,9 @@ def _session_info(sandbox_name: str, tmux_session: str) -> dict | None:
     return read_session_info_any(transcript_path)
 
 
-def _format_session_line(index: int, tmux_name: str, info: dict | None, attached: bool = False) -> str:
+def _format_session_line(
+    index: int, tmux_name: str, info: dict | None, attached: bool = False
+) -> str:
     """Format a single session line for the picker."""
     status = "attached" if attached else "detached"
     if info is None:
@@ -141,6 +145,7 @@ def _format_session_line(index: int, tmux_name: str, info: dict | None, attached
 def cmd_session_link(config: Config, args: argparse.Namespace) -> None:
     """Internal: called by SessionStart hook to link tmux↔transcript session."""
     import json as _json
+
     sandbox = os.environ.get("CCBOX_SANDBOX", "")
     tmux_session = os.environ.get("CCBOX_TMUX_SESSION", "")
     if not sandbox or not tmux_session:
@@ -215,6 +220,7 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
             attach_session(container, name)
         elif isinstance(result, MountToSandbox):
             from ccbox.mount import add_mount
+
             add_mount(config, result.sandbox, cwd, readonly=result.readonly)
             container = ensure_running(config, result.sandbox)
             cmd = build_claude_command()
@@ -302,8 +308,11 @@ def cmd_sessions(config: Config, args: argparse.Namespace) -> None:
         sandbox_name = resolve_sandbox(config, args.sandbox)
     except ValueError:
         if args.sandbox is None:
-            print("No sandbox found for current directory. Use -a to list all.", file=sys.stderr)
-            raise SystemExit(1)
+            print(
+                "No sandbox found for current directory. Use -a to list all.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from None
         raise
     container = ensure_running(config, sandbox_name)
     sessions = list_sessions(container)
@@ -356,8 +365,11 @@ def cmd_attach(config: Config, args: argparse.Namespace) -> None:
         sandbox_name = resolve_sandbox(config, sandbox_arg)
     except ValueError:
         if sandbox_arg is None:
-            print("No sandbox found for current directory. Use -a to pick from all.", file=sys.stderr)
-            raise SystemExit(1)
+            print(
+                "No sandbox found for current directory. Use -a to pick from all.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from None
         raise
     container = ensure_running(config, sandbox_name)
     if session_arg is not None:
@@ -374,7 +386,6 @@ def cmd_attach(config: Config, args: argparse.Namespace) -> None:
 
 def _cmd_attach_all(config: Config) -> None:
     """Pick a session from all sandboxes and attach."""
-    from ccbox.picker import pick_session_all
     result = pick_session_all(config)
     if result is None:
         print("No session selected.")
@@ -467,19 +478,33 @@ def cmd_port(config: Config, args: argparse.Namespace) -> None:
     if args.port_action == "forward":
         host_addr, host_port = _parse_addr_port(args.target)
         name = add_forward(
-            container, args.container_port, host_addr, host_port, udp=args.udp,
+            container,
+            args.container_port,
+            host_addr,
+            host_port,
+            udp=args.udp,
         )
         proto = "udp" if args.udp else "tcp"
-        print(f"Forward ({proto}): container:{args.container_port} → {host_addr}:{host_port}  [{name}]")
+        msg = f"Forward ({proto}): container:{args.container_port} → {host_addr}:{host_port}"
+        print(f"{msg}  [{name}]")
 
     elif args.port_action == "expose":
-        bind_addr, bind_port = _parse_addr_port(args.bind, default_addr="127.0.0.1") if args.bind else ("127.0.0.1", None)
+        bind_addr, bind_port = (
+            _parse_addr_port(args.bind, default_addr="127.0.0.1")
+            if args.bind
+            else ("127.0.0.1", None)
+        )
         name = add_expose(
-            container, args.container_port, bind_addr, bind_port, udp=args.udp,
+            container,
+            args.container_port,
+            bind_addr,
+            bind_port,
+            udp=args.udp,
         )
         proto = "udp" if args.udp else "tcp"
         effective_port = bind_port if bind_port is not None else args.container_port
-        print(f"Expose ({proto}): {bind_addr}:{effective_port} → container:{args.container_port}  [{name}]")
+        msg = f"Expose ({proto}): {bind_addr}:{effective_port} → container:{args.container_port}"
+        print(f"{msg}  [{name}]")
 
     elif args.port_action == "ls":
         ports = list_ports(container)
@@ -530,12 +555,16 @@ def cmd_config(config: Config, args: argparse.Namespace) -> None:
             print(f"Added auto-mount: {resolved} ({mode})")
             if os.path.isfile(resolved):
                 from ccbox.mount import _warn_file_mount
+
                 _warn_file_mount(resolved)
         elif args.mounts_action == "remove":
             if config.remove_auto_mount(args.path):
                 print(f"Removed auto-mount: {os.path.realpath(args.path)}")
             else:
-                print(f"Not found in auto-mounts: {os.path.realpath(args.path)}", file=sys.stderr)
+                print(
+                    f"Not found in auto-mounts: {os.path.realpath(args.path)}",
+                    file=sys.stderr,
+                )
                 raise SystemExit(1)
         elif args.mounts_action == "list":
             mounts = config.state.get_auto_mounts()
@@ -635,7 +664,6 @@ def cmd_cp(config: Config, args: argparse.Namespace) -> None:
         print(f"Copied {src} → {dest} (mounted rw)")
 
 
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ccbox",
@@ -645,15 +673,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ccbox claude [-s SANDBOX] [-- args...]
     p_claude = sub.add_parser("claude", help="New session running claude with given args")
-    p_claude.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                          help="Sandbox name (default: auto from CWD)")
-    p_claude.add_argument("claude_args", nargs=argparse.REMAINDER, help="Arguments to pass to claude (use -- to separate)")
+    p_claude.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
+    p_claude.add_argument(
+        "claude_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments to pass to claude (use -- to separate)",
+    )
 
     # ccbox codex [-s SANDBOX] [-- args...]
     p_codex = sub.add_parser("codex", help="New session running codex --yolo with given args")
-    p_codex.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                         help="Sandbox name (default: auto from CWD)")
-    p_codex.add_argument("codex_args", nargs=argparse.REMAINDER, help="Arguments to pass to codex (use -- to separate)")
+    p_codex.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
+    p_codex.add_argument(
+        "codex_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments to pass to codex (use -- to separate)",
+    )
 
     # ccbox ls
     sub.add_parser("ls", help="List sandboxes")
@@ -661,63 +707,123 @@ def build_parser() -> argparse.ArgumentParser:
     # ccbox create <name> [--bare]
     p_create = sub.add_parser("create", help="Create a sandbox")
     p_create.add_argument("name", help="Sandbox name")
-    p_create.add_argument("--bare", action="store_true",
-                          help="Don't mount current directory (use ccbox mount -s NAME later)")
+    p_create.add_argument(
+        "--bare",
+        action="store_true",
+        help="Don't mount current directory (use ccbox mount -s NAME later)",
+    )
 
     # ccbox mount <path> [-s SANDBOX] [--ro]
     p_mount = sub.add_parser("mount", help="Add a mount")
     p_mount.add_argument("path", help="Host directory to mount")
-    p_mount.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                         help="Sandbox name (default: auto from CWD)")
+    p_mount.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
     p_mount.add_argument("--ro", action="store_true", help="Read-only mount")
 
     # ccbox unmount <path> [-s SANDBOX]
     p_unmount = sub.add_parser("unmount", help="Remove a mount")
     p_unmount.add_argument("path", help="Mount path to remove")
-    p_unmount.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                           help="Sandbox name (default: auto from CWD)")
+    p_unmount.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox sessions [-s SANDBOX] [-a]
     p_sessions = sub.add_parser("sessions", help="List sessions")
-    p_sessions.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                            help="Sandbox name (default: auto from CWD)")
-    p_sessions.add_argument("-a", "--all", action="store_true",
-                            help="List sessions across all sandboxes")
+    p_sessions.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
+    p_sessions.add_argument(
+        "-a", "--all", action="store_true", help="List sessions across all sandboxes"
+    )
 
     # ccbox attach [session] [-s SANDBOX] [-a]
     p_attach = sub.add_parser("attach", help="Attach to a session")
-    p_attach.add_argument("session", nargs="?", default=None, help="Session name (picker if omitted)")
-    p_attach.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                          help="Sandbox name (default: auto from CWD)")
-    p_attach.add_argument("-a", "--all", action="store_true",
-                          help="Pick from sessions across all sandboxes")
+    p_attach.add_argument(
+        "session", nargs="?", default=None, help="Session name (picker if omitted)"
+    )
+    p_attach.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
+    p_attach.add_argument(
+        "-a",
+        "--all",
+        action="store_true",
+        help="Pick from sessions across all sandboxes",
+    )
 
     # ccbox kill [session] [--all] [-s SANDBOX]
     p_kill = sub.add_parser("kill", help="Kill session(s)")
-    p_kill.add_argument("session", nargs="?", default=None, help="Session name (picker if omitted and not --all)")
+    p_kill.add_argument(
+        "session",
+        nargs="?",
+        default=None,
+        help="Session name (picker if omitted and not --all)",
+    )
     p_kill.add_argument("--all", action="store_true", help="Kill all sessions")
-    p_kill.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                        help="Sandbox name (default: auto from CWD)")
+    p_kill.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox stop [-s SANDBOX]
     p_stop = sub.add_parser("stop", help="Stop a sandbox")
-    p_stop.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                        help="Sandbox name (default: auto from CWD)")
+    p_stop.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox rm [-s SANDBOX]
     p_rm = sub.add_parser("rm", help="Remove a sandbox")
-    p_rm.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                      help="Sandbox name (default: auto from CWD)")
+    p_rm.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox status [-s SANDBOX]
     p_status = sub.add_parser("status", help="Show sandbox details")
-    p_status.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                          help="Sandbox name (default: auto from CWD)")
+    p_status.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox shell [-s SANDBOX]
     p_shell = sub.add_parser("shell", help="Bash shell in sandbox")
-    p_shell.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                         help="Sandbox name (default: auto from CWD)")
+    p_shell.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox port {forward,expose,ls,rm}
     p_port = sub.add_parser("port", help="Port forwarding")
@@ -728,46 +834,90 @@ def build_parser() -> argparse.ArgumentParser:
     p_fwd.add_argument("container_port", type=int, help="Port inside container")
     p_fwd.add_argument("target", help="[addr:]port on host side")
     p_fwd.add_argument("--udp", action="store_true", help="Use UDP instead of TCP")
-    p_fwd.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                       help="Sandbox name (default: auto from CWD)")
+    p_fwd.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox port expose <container_port> [[addr:]<bind_port>] [--udp] [-s SANDBOX]
     p_exp = port_sub.add_parser("expose", help="Host→Container forwarding")
     p_exp.add_argument("container_port", type=int, help="Port inside container")
-    p_exp.add_argument("bind", nargs="?", default=None, help="[addr:]port to bind on host (default: localhost:container_port)")
+    p_exp.add_argument(
+        "bind",
+        nargs="?",
+        default=None,
+        help="[addr:]port to bind on host (default: localhost:container_port)",
+    )
     p_exp.add_argument("--udp", action="store_true", help="Use UDP instead of TCP")
-    p_exp.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                       help="Sandbox name (default: auto from CWD)")
+    p_exp.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox port ls [-s SANDBOX]
     p_port_ls = port_sub.add_parser("ls", help="List port forwards")
-    p_port_ls.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                           help="Sandbox name (default: auto from CWD)")
+    p_port_ls.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox port rm <name> [-s SANDBOX]
     p_port_rm = port_sub.add_parser("rm", help="Remove a port forward")
     p_port_rm.add_argument("name", help="Device name (from port ls)")
-    p_port_rm.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                           help="Sandbox name (default: auto from CWD)")
+    p_port_rm.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox sync-automount [-s SANDBOX] [--all] [--dry-run]
     p_sync = sub.add_parser("sync-automount", help="Sync auto-mount config to running sandbox(es)")
-    p_sync.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                        help="Sandbox name (default: auto from CWD)")
+    p_sync.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
     p_sync.add_argument("--all", action="store_true", help="Sync all sandboxes")
-    p_sync.add_argument("--dry-run", "-n", action="store_true", help="Show changes without applying")
+    p_sync.add_argument(
+        "--dry-run", "-n", action="store_true", help="Show changes without applying"
+    )
 
     # ccbox cp <src> [dest] [-s/--sandbox NAME]
     p_cp = sub.add_parser("cp", help="Copy file/dir from sandbox to host")
     p_cp.add_argument("src", help="Path inside the container")
-    p_cp.add_argument("dest", nargs="?", default=None, help="Destination on host (default: same path)")
-    p_cp.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                      help="Sandbox name (default: auto from CWD)")
+    p_cp.add_argument(
+        "dest", nargs="?", default=None, help="Destination on host (default: same path)"
+    )
+    p_cp.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox resolve [-s SANDBOX]
     p_resolve = sub.add_parser("resolve", help="Show which sandbox resolves for current directory")
-    p_resolve.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
-                           help="Sandbox name (default: auto from CWD)")
+    p_resolve.add_argument(
+        "-s",
+        "--sandbox",
+        default=None,
+        metavar="SANDBOX",
+        help="Sandbox name (default: auto from CWD)",
+    )
 
     # ccbox config env add/remove/list
     p_config = sub.add_parser("config", help="Configuration management")
@@ -782,10 +932,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ccbox config pool [name]
     p_pool = config_sub.add_parser("pool", help="Get/set LXD storage pool")
-    p_pool.add_argument("pool_name", nargs="?", default=None, help="Pool name (omit to show current)")
+    p_pool.add_argument(
+        "pool_name", nargs="?", default=None, help="Pool name (omit to show current)"
+    )
 
     # ccbox config mounts add/remove/list/reset
-    p_mounts = config_sub.add_parser("mounts", help="Manage auto-mounts (applied to every new sandbox)")
+    p_mounts = config_sub.add_parser(
+        "mounts", help="Manage auto-mounts (applied to every new sandbox)"
+    )
     mounts_sub = p_mounts.add_subparsers(dest="mounts_action")
     p_mounts_add = mounts_sub.add_parser("add", help="Add auto-mount")
     p_mounts_add.add_argument("path", help="Host path (file or directory)")
@@ -861,7 +1015,7 @@ def main() -> None:
         handler(config, args)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None
     except KeyboardInterrupt:
         print()
-        raise SystemExit(130)
+        raise SystemExit(130) from None
