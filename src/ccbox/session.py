@@ -184,7 +184,6 @@ def attach_session(container: str, session_name: str) -> None:
         ["tmux", "-f", TMUX_CONF, "attach-session", "-t", session_name],
         user=CONTAINER_USER,
     )
-    print(f"Detached from session '{session_name}'.")
 
 
 def kill_session(container: str, name: str) -> None:
