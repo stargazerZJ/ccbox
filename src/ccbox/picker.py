@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from rich.console import Console
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.binding import Binding
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
@@ -128,48 +127,38 @@ class _PickerApp(App[str | None]):
         background: $accent;
     }
     """
-    BINDINGS = [
-        Binding("escape", "quit", "Cancel", priority=True),
-        Binding("backspace", "back", "Back", priority=True),
-    ]
 
-    def __init__(self, options: list[Option | None], bindings: list[tuple[str, str, str]] | None = None, *, numbered: bool = True) -> None:
+    def __init__(self, options: list[Option | None], shortcuts: dict[str, str] | None = None) -> None:
         super().__init__()
         self._options = options
-        extra: list[Binding] = []
-        if bindings:
-            for key, action, desc in bindings:
-                extra.append(Binding(key, action, desc, priority=True))
-        if numbered:
-            option_ids = [o.id for o in options if isinstance(o, Option)]
-            for i, oid in enumerate(option_ids[:9], 1):
-                extra.append(Binding(str(i), f"pick('{oid}')", str(i), priority=True))
-        if extra:
-            self.BINDINGS = list(self.BINDINGS) + extra
+        self._shortcuts = shortcuts or {}
 
     def compose(self) -> ComposeResult:
         yield OptionList(*self._options)
 
+    def on_key(self, event) -> None:
+        if event.character in self._shortcuts:
+            event.prevent_default()
+            event.stop()
+            self.exit(self._shortcuts[event.character])
+        elif event.key == "escape":
+            event.prevent_default()
+            self.exit(None)
+        elif event.key == "backspace":
+            event.prevent_default()
+            self.exit("__back__")
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.exit(event.option.id)
 
-    def action_quit(self) -> None:
-        self.exit(None)
 
-    def action_back(self) -> None:
-        self.exit("__back__")
-
-    def action_pick(self, option_id: str) -> None:
-        """Shortcut action: select by option id."""
-        self.exit(option_id)
-
-
-def _run_picker(options: list[Option | None], bindings: list[tuple[str, str, str]] | None = None, *, numbered: bool = True) -> str | None:
+def _run_picker(options: list[Option | None], shortcuts: dict[str, str] | None = None, *, numbered: bool = True) -> str | None:
     """Run an inline picker and return the selected option id.
 
     If numbered=True, selectable options get 1-9 digit prefixes and shortcuts.
     Returns '__back__' on backspace, None on escape.
     """
+    all_shortcuts = dict(shortcuts) if shortcuts else {}
     if numbered:
         idx = 0
         for i, opt in enumerate(options):
@@ -179,7 +168,8 @@ def _run_picker(options: list[Option | None], bindings: list[tuple[str, str, str
                 labeled.append(f"{idx} ", style="dim")
                 labeled.append_text(opt.prompt if isinstance(opt.prompt, Text) else Text(str(opt.prompt)))
                 options[i] = Option(labeled, id=opt.id)
-    app = _PickerApp(options, bindings, numbered=numbered)
+                all_shortcuts[str(idx)] = opt.id
+    app = _PickerApp(options, all_shortcuts)
     return app.run(inline=True)
 
 
@@ -206,7 +196,7 @@ def pick_session(detached: list[dict], sandbox_name: str) -> str | None:
     console.print(f"[bold]Sessions in [cyan]{sandbox_name}[/cyan]:[/bold]")
 
     options: list[Option | None] = []
-    bindings: list[tuple[str, str, str]] = [("n", "pick('__new__')", "New session"), ("q", "pick('__quit__')", "Quit")]
+    shortcuts: dict[str, str] = {"n": "__new__", "q": "__quit__"}
     for s in detached:
         info = _session_info(sandbox_name, s["name"])
         detail = _format_detail(info)
@@ -216,7 +206,7 @@ def pick_session(detached: list[dict], sandbox_name: str) -> str | None:
     options.append(Option(_styled_option("New session", key="n"), id="__new__"))
     options.append(Option(_styled_option("Quit", key="q"), id="__quit__"))
 
-    result = _run_picker(options, bindings)
+    result = _run_picker(options, shortcuts)
     if result in (None, "__back__", "__quit__"):
         raise SystemExit(0)
     if result == "__new__":
@@ -275,7 +265,7 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
 
     while True:
         options: list[Option | None] = []
-        bindings: list[tuple[str, str, str]] = []
+        shortcuts: dict[str, str] = {"n": "new", "q": "__quit__"}
 
         # Recent sessions
         if recent:
@@ -286,7 +276,7 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
                 prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail, key=str(idx + 1))
                 options.append(Option(prompt, id=oid))
                 if idx < 9:
-                    bindings.append((str(idx + 1), f"pick('{oid}')", str(idx + 1)))
+                    shortcuts[str(idx + 1)] = oid
 
         # Actions
         options.append(None)
@@ -294,19 +284,18 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
             _styled_option(f"New sandbox for {dirname}/", key="n"),
             id="new",
         ))
-        bindings.append(("n", "pick('new')", "New sandbox"))
 
         if sandboxes:
             options.append(Option(
                 _styled_option("Mount to existing sandbox\u2026", key="m"),
                 id="mount",
             ))
-            bindings.append(("m", "pick('mount')", "Mount"))
+            shortcuts["m"] = "mount"
             options.append(Option(
                 _styled_option("Mount to existing sandbox (read-only)\u2026", key="r"),
                 id="mount_ro",
             ))
-            bindings.append(("r", "pick('mount_ro')", "Read-only mount"))
+            shortcuts["r"] = "mount_ro"
 
         options.append(Option(
             _styled_option("Quit", key="q"),
@@ -314,7 +303,7 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
         ))
         bindings.append(("q", "pick('__quit__')", "Quit"))
 
-        result = _run_picker(options, bindings, numbered=False)
+        result = _run_picker(options, shortcuts, numbered=False)
 
         if result in (None, "__back__", "__quit__"):
             raise SystemExit(0)
