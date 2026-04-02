@@ -198,7 +198,7 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
             attach_session(container, name)
         elif isinstance(result, MountToSandbox):
             from ccbox.mount import add_mount
-            add_mount(config, result.sandbox, cwd, readonly=False)
+            add_mount(config, result.sandbox, cwd, readonly=result.readonly)
             container = ensure_running(config, result.sandbox)
             cmd = build_claude_command()
             name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=result.sandbox)

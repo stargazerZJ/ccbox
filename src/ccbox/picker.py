@@ -36,6 +36,7 @@ class NewSandbox:
 class MountToSandbox:
     """Mount CWD into an existing sandbox and start a session."""
     sandbox: str
+    readonly: bool = False
 
 
 PickResult = AttachSession | NewSandbox | MountToSandbox
@@ -209,6 +210,10 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
             "name": "\u25c6 Mount to existing sandbox\u2026",
             "value": ("mount",),
         })
+        choices.append({
+            "name": "\u25c6 Mount to existing sandbox (read-only)\u2026",
+            "value": ("mount_ro",),
+        })
 
     console.print(f"[dim]No sandbox for[/dim] [bold]{cwd}[/bold]")
     result = inquirer.select(
@@ -223,19 +228,21 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
     elif result[0] == "new":
         return NewSandbox()
     elif result[0] == "mount":
-        return _pick_sandbox_for_mount(config)
+        return _pick_sandbox_for_mount(config, readonly=False)
+    elif result[0] == "mount_ro":
+        return _pick_sandbox_for_mount(config, readonly=True)
     # unreachable
     return NewSandbox()
 
 
-def _pick_sandbox_for_mount(config: Config) -> MountToSandbox:
+def _pick_sandbox_for_mount(config: Config, readonly: bool = False) -> MountToSandbox:
     """Sub-picker: choose which sandbox to mount CWD into."""
     choices = []
     for name, entry in config.state.sandboxes.items():
         mounts = ", ".join(os.path.basename(m.path) for m in entry.mounts[:3])
         label = name
         if mounts:
-            label += f"  [dim]({mounts})[/dim]"
+            label += f"  ({mounts})"
         choices.append({"name": label, "value": name})
 
     result = inquirer.select(
@@ -244,4 +251,4 @@ def _pick_sandbox_for_mount(config: Config) -> MountToSandbox:
         pointer="\u276f",
         show_cursor=False,
     ).execute()
-    return MountToSandbox(sandbox=result)
+    return MountToSandbox(sandbox=result, readonly=readonly)
