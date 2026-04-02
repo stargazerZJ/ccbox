@@ -175,16 +175,17 @@ def _run_picker(options: list[Option | None], shortcuts: dict[str, str] | None =
 
 # -- Pickers --
 
-def pick_session(detached: list[dict], sandbox_name: str) -> str | None:
-    """Interactive picker for detached sessions within a resolved sandbox.
+def pick_session(sessions: list[dict], sandbox_name: str) -> str | None:
+    """Interactive picker for sessions within a resolved sandbox.
 
+    sessions: list of dicts with 'name' and 'attached' keys.
     Returns session name to attach, or None to create a new session.
     """
-    if not detached:
+    if not sessions:
         return None
-    if len(detached) == 1:
-        # Auto-attach: print info and return
-        s = detached[0]
+    if len(sessions) == 1 and not sessions[0]["attached"]:
+        # Single detached session: auto-attach
+        s = sessions[0]
         info = _session_info(sandbox_name, s["name"])
         detail = _format_detail(info)
         msg = f"Reattaching to session '{s['name']}'"
@@ -197,11 +198,15 @@ def pick_session(detached: list[dict], sandbox_name: str) -> str | None:
 
     options: list[Option | None] = []
     shortcuts: dict[str, str] = {"n": "__new__", "q": "__quit__"}
-    for s in detached:
+    for s in sessions:
         info = _session_info(sandbox_name, s["name"])
         detail = _format_detail(info)
-        prompt = _styled_option(s["name"], detail)
-        options.append(Option(prompt, id=s["name"]))
+        name = s["name"]
+        if s["attached"]:
+            prompt = _styled_option(name, f"(attached)  {detail}" if detail else "(attached)")
+        else:
+            prompt = _styled_option(name, detail)
+        options.append(Option(prompt, id=name))
     options.append(None)
     options.append(Option(_styled_option("New session", key="n"), id="__new__"))
     options.append(Option(_styled_option("Quit", key="q"), id="__quit__"))

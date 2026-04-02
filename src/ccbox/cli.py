@@ -31,11 +31,10 @@ from ccbox.session import (
     build_claude_command,
     build_codex_command,
     create_session,
-    detached_sessions,
+    list_sessions,
     get_forwarded_env,
     kill_all_sessions,
     kill_session,
-    list_sessions,
 )
 from ccbox.transcript import read_session_info_any, relative_time
 from ccbox.picker import (
@@ -174,9 +173,9 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
     if sandbox_name is not None:
         # CWD resolves — use session picker within this sandbox
         container = ensure_running(config, sandbox_name)
-        detached = detached_sessions(container)
+        sessions = list_sessions(container)
 
-        chosen = pick_session(detached, sandbox_name)
+        chosen = pick_session(sessions, sandbox_name)
         if chosen is not None:
             attach_session(container, chosen)
         else:
@@ -304,7 +303,15 @@ def cmd_attach(config: Config, args: argparse.Namespace) -> None:
     """Attach to a session."""
     sandbox_name = resolve_sandbox(config, args.sandbox)
     container = ensure_running(config, sandbox_name)
-    session_name = resolve_session(container, args.session)
+    if args.session is not None:
+        session_name = resolve_session(container, args.session)
+    else:
+        sessions = list_sessions(container)
+        session_name = pick_session(sessions, sandbox_name)
+        if session_name is None:
+            # User chose "new session" — not applicable for attach
+            print("No session selected.")
+            return
     attach_session(container, session_name)
 
 
