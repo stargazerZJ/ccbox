@@ -99,16 +99,16 @@ def _parse_timestamp(info: dict | None) -> float:
         return 0.0
 
 
-def _styled_option(primary: str, detail: str = "", *, prefix: str = "", key: str = "") -> Text:
+def _styled_option(primary: str, detail: str = "", *, prefix: str = "", key: str = "", dim_primary: bool = False) -> Text:
     """Build a Rich Text with optional dim detail and key hint."""
     t = Text()
     if key:
         t.append(f"[{key}] ", style="dim")
     if prefix:
         t.append(prefix)
-    t.append(primary)
+    t.append(primary, style="dim" if dim_primary else "")
     if detail:
-        t.append(f"  {detail}", style="dim")
+        t.append(f"  {detail}", style="dim" if not dim_primary else "")
     return t
 
 
@@ -124,7 +124,9 @@ class _PickerApp(App[str | None]):
         background: $surface;
     }
     OptionList > .option-list--option-highlighted {
-        background: $accent;
+        color: $block-cursor-foreground;
+        background: $block-cursor-background;
+        text-style: $block-cursor-text-style;
     }
     """
 
@@ -144,9 +146,16 @@ class _PickerApp(App[str | None]):
         elif event.key == "escape":
             event.prevent_default()
             self.exit(None)
-        elif event.key == "backspace":
+        elif event.key in ("backspace", "left"):
             event.prevent_default()
             self.exit("__back__")
+        elif event.key == "right":
+            event.prevent_default()
+            ol = self.query_one(OptionList)
+            highlighted = ol.highlighted
+            if highlighted is not None:
+                opt = ol.get_option_at_index(highlighted)
+                self.exit(opt.id)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.exit(event.option.id)
@@ -203,9 +212,9 @@ def pick_session(sessions: list[dict], sandbox_name: str) -> str | None:
         detail = _format_detail(info)
         name = s["name"]
         if s["attached"]:
-            prompt = _styled_option(name, f"(attached)  {detail}" if detail else "(attached)")
+            prompt = _styled_option(name, f"(attached)  {detail}" if detail else "(attached)", dim_primary=bool(detail))
         else:
-            prompt = _styled_option(name, detail)
+            prompt = _styled_option(name, detail, dim_primary=bool(detail))
         options.append(Option(prompt, id=name))
     options.append(None)
     options.append(Option(_styled_option("New session", key="n"), id="__new__"))
@@ -278,7 +287,7 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
             for idx, r in enumerate(recent):
                 detail = _format_detail(r.info)
                 oid = f"attach:{r.sandbox}:{r.tmux_name}"
-                prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail, key=str(idx + 1))
+                prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail, key=str(idx + 1), dim_primary=bool(detail))
                 options.append(Option(prompt, id=oid))
                 if idx < 9:
                     shortcuts[str(idx + 1)] = oid
@@ -306,8 +315,6 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
             _styled_option("Quit", key="q"),
             id="__quit__",
         ))
-        bindings.append(("q", "pick('__quit__')", "Quit"))
-
         result = _run_picker(options, shortcuts, numbered=False)
 
         if result in (None, "__back__", "__quit__"):
@@ -336,8 +343,12 @@ def _pick_sandbox_for_mount(config: Config, readonly: bool = False) -> MountToSa
         prompt = _styled_option(name, f"({mounts})" if mounts else "")
         options.append(Option(prompt, id=name))
 
+    options.append(None)
+    options.append(Option(_styled_option("Back", key="b"), id="__back__"))
+    shortcuts: dict[str, str] = {"b": "__back__"}
+
     console.print("[bold]Mount to:[/bold]")
-    result = _run_picker(options)
+    result = _run_picker(options, shortcuts)
     if result is None:
         raise SystemExit(0)
     if result == "__back__":
