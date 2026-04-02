@@ -204,19 +204,20 @@ def pick_session(sessions: list[dict], sandbox_name: str) -> str | None:
         console.print(msg)
         return s["name"]
 
-    console.print(f"[bold]Sessions in [cyan]{sandbox_name}[/cyan]:[/bold]")
+    console.print(f"[bold]Sessions in [cyan]{sandbox_name}[/cyan]:[/bold]", end="")
 
+    max_name = max(len(s["name"]) for s in sessions)
     options: list[Option | None] = []
     shortcuts: dict[str, str] = {"n": "__new__", "q": "__quit__"}
     for s in sessions:
         info = _session_info(sandbox_name, s["name"])
         detail = _format_detail(info)
-        name = s["name"]
+        name = s["name"].ljust(max_name)
         if s["attached"]:
             prompt = _styled_option(name, f"(attached)  {detail}" if detail else "(attached)", dim_primary=bool(detail))
         else:
             prompt = _styled_option(name, detail, dim_primary=bool(detail))
-        options.append(Option(prompt, id=name))
+        options.append(Option(prompt, id=s["name"]))
     options.append(None)
     options.append(Option(_styled_option("New session", key="n"), id="__new__"))
     options.append(Option(_styled_option("Quit", key="q"), id="__quit__"))
@@ -366,7 +367,11 @@ def pick_session_all(config: Config) -> AttachSession | None:
         console.print("No sessions in any sandbox.")
         return None
 
-    console.print("[bold]All sessions:[/bold]")
+    console.print("[bold]All sessions:[/bold]", end="")
+
+    # Pad names to consistent width for aligned columns
+    names = [f"{r.sandbox}/{r.tmux_name}" for r in recent]
+    max_name = max(len(n) for n in names)
 
     options: list[Option | None] = []
     shortcuts: dict[str, str] = {"q": "__quit__"}
@@ -375,7 +380,8 @@ def pick_session_all(config: Config) -> AttachSession | None:
         if r.attached:
             detail = f"(attached)  {detail}" if detail else "(attached)"
         oid = f"attach:{r.sandbox}:{r.tmux_name}"
-        prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail, dim_primary=bool(detail))
+        padded = names[idx].ljust(max_name)
+        prompt = _styled_option(padded, detail, dim_primary=bool(detail))
         options.append(Option(prompt, id=oid))
     options.append(None)
     options.append(Option(_styled_option("Quit", key="q"), id="__quit__"))
