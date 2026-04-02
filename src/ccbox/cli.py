@@ -218,13 +218,7 @@ def cmd_claude(config: Config, args: argparse.Namespace) -> None:
     """Always create a new session running claude with given args."""
     cwd = os.getcwd()
 
-    if args.sandbox is not None:
-        sandbox_name = resolve_sandbox(config, args.sandbox)
-    else:
-        sandbox_name = config.sandbox_for_path(cwd)
-        if sandbox_name is None:
-            sandbox_name = auto_create_sandbox(config, cwd)
-
+    sandbox_name = resolve_sandbox(config, args.sandbox)
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
 
@@ -240,13 +234,7 @@ def cmd_codex(config: Config, args: argparse.Namespace) -> None:
     """Always create a new session running codex --yolo with given args."""
     cwd = os.getcwd()
 
-    if args.sandbox is not None:
-        sandbox_name = resolve_sandbox(config, args.sandbox)
-    else:
-        sandbox_name = config.sandbox_for_path(cwd)
-        if sandbox_name is None:
-            sandbox_name = auto_create_sandbox(config, cwd)
-
+    sandbox_name = resolve_sandbox(config, args.sandbox)
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
 
