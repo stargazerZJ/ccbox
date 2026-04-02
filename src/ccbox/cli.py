@@ -75,6 +75,15 @@ def _container_username(container: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else "ubuntu"
 
 
+def _parse_sandbox_session(spec: str) -> tuple[str, str] | None:
+    """Parse 'sandbox/session' spec. Returns (sandbox, session) or None if plain name."""
+    if "/" in spec:
+        sandbox, _, session = spec.partition("/")
+        if sandbox and session:
+            return sandbox, session
+    return None
+
+
 def resolve_session(container: str, name: str | None) -> str:
     """Return a session name, prompting with a picker if name is None and multiple exist."""
     sessions = list_sessions(container)
@@ -324,7 +333,7 @@ def _cmd_sessions_all(config: Config) -> None:
         print(f"{name}:")
         for i, s in enumerate(sessions):
             info = _session_info(name, s["name"])
-            print(_format_session_line(i, s["name"], info, attached=s["attached"]))
+            print(_format_session_line(i, f"{name}/{s['name']}", info, attached=s["attached"]))
         total += len(sessions)
         print()
     if total == 0:
@@ -336,16 +345,23 @@ def cmd_attach(config: Config, args: argparse.Namespace) -> None:
     if getattr(args, "all", False) and args.session is None:
         _cmd_attach_all(config)
         return
+    # Parse sandbox/session combined spec
+    sandbox_arg = args.sandbox
+    session_arg = args.session
+    if session_arg is not None:
+        parsed = _parse_sandbox_session(session_arg)
+        if parsed:
+            sandbox_arg, session_arg = parsed
     try:
-        sandbox_name = resolve_sandbox(config, args.sandbox)
+        sandbox_name = resolve_sandbox(config, sandbox_arg)
     except ValueError:
-        if args.sandbox is None:
+        if sandbox_arg is None:
             print("No sandbox found for current directory. Use -a to pick from all.", file=sys.stderr)
             raise SystemExit(1)
         raise
     container = ensure_running(config, sandbox_name)
-    if args.session is not None:
-        session_name = resolve_session(container, args.session)
+    if session_arg is not None:
+        session_name = resolve_session(container, session_arg)
     else:
         sessions = list_sessions(container)
         session_name = pick_session(sessions, sandbox_name)
@@ -369,7 +385,14 @@ def _cmd_attach_all(config: Config) -> None:
 
 def cmd_kill(config: Config, args: argparse.Namespace) -> None:
     """Kill session(s)."""
-    sandbox_name = resolve_sandbox(config, args.sandbox)
+    # Parse sandbox/session combined spec
+    sandbox_arg = args.sandbox
+    session_arg = args.session
+    if session_arg is not None:
+        parsed = _parse_sandbox_session(session_arg)
+        if parsed:
+            sandbox_arg, session_arg = parsed
+    sandbox_name = resolve_sandbox(config, sandbox_arg)
     container = ensure_running(config, sandbox_name)
 
     if args.all:
