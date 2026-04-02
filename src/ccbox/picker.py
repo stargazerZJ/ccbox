@@ -1,4 +1,4 @@
-"""Interactive pickers for sandbox/session selection using rich + InquirerPy."""
+"""Interactive pickers for sandbox/session selection using Textual."""
 
 from __future__ import annotations
 
@@ -6,8 +6,11 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from InquirerPy import inquirer
 from rich.console import Console
+from rich.text import Text
+from textual.app import App, ComposeResult
+from textual.widgets import OptionList
+from textual.widgets.option_list import Option
 
 from ccbox import lxd
 from ccbox.config import Config, SESSION_LINK_DIR
@@ -96,6 +99,80 @@ def _parse_timestamp(info: dict | None) -> float:
         return 0.0
 
 
+def _styled_option(primary: str, detail: str = "", *, prefix: str = "") -> Text:
+    """Build a Rich Text with optional dim detail."""
+    t = Text()
+    if prefix:
+        t.append(prefix)
+    t.append(primary)
+    if detail:
+        t.append(f"  {detail}", style="dim")
+    return t
+
+
+# -- Inline picker app --
+
+class _PickerApp(App[str | None]):
+    """Generic inline picker. Subclass or instantiate with options."""
+
+    CSS = """
+    OptionList {
+        height: auto;
+        max-height: 20;
+        background: $surface;
+    }
+    OptionList > .option-list--option-highlighted {
+        background: $accent;
+    }
+    """
+    BINDINGS = [
+        ("escape", "quit", "Cancel"),
+    ]
+
+    def __init__(self, options: list[Option | None], bindings: list[tuple[str, str, str]] | None = None) -> None:
+        super().__init__()
+        self._options = options
+        # Build id list for number-key shortcuts (selectable options only)
+        self._option_ids = [o.id for o in options if isinstance(o, Option)]
+        extra = list(bindings) if bindings else []
+        # Add 1-9 shortcuts for the first 9 selectable options
+        for i, oid in enumerate(self._option_ids[:9], 1):
+            extra.append((str(i), f"pick('{oid}')", str(i)))
+        if extra:
+            self.BINDINGS = list(self.BINDINGS) + extra
+
+    def compose(self) -> ComposeResult:
+        yield OptionList(*self._options)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.exit(event.option.id)
+
+    def action_quit(self) -> None:
+        self.exit(None)
+
+    def action_pick(self, option_id: str) -> None:
+        """Shortcut action: select by option id."""
+        self.exit(option_id)
+
+
+def _run_picker(options: list[Option | None], bindings: list[tuple[str, str, str]] | None = None) -> str | None:
+    """Run an inline picker and return the selected option id.
+
+    Selectable options are automatically numbered 1-9 with keyboard shortcuts.
+    """
+    # Prepend number labels to selectable options
+    idx = 0
+    for i, opt in enumerate(options):
+        if isinstance(opt, Option) and idx < 9:
+            idx += 1
+            numbered = Text()
+            numbered.append(f"{idx} ", style="dim")
+            numbered.append_text(opt.prompt if isinstance(opt.prompt, Text) else Text(str(opt.prompt)))
+            options[i] = Option(numbered, id=opt.id)
+    app = _PickerApp(options, bindings)
+    return app.run(inline=True)
+
+
 # -- Pickers --
 
 def pick_session(detached: list[dict], sandbox_name: str) -> str | None:
@@ -116,24 +193,20 @@ def pick_session(detached: list[dict], sandbox_name: str) -> str | None:
         console.print(msg)
         return s["name"]
 
-    # Build choices for multi-session picker
-    choices = []
+    console.print(f"[bold]Sessions in [cyan]{sandbox_name}[/cyan]:[/bold]")
+
+    options: list[Option | None] = []
     for s in detached:
         info = _session_info(sandbox_name, s["name"])
         detail = _format_detail(info)
-        label = s["name"]
-        if detail:
-            label += f"  {detail}"
-        choices.append({"name": label, "value": s["name"]})
-    choices.append({"name": "\u25c6 New session", "value": None})
+        prompt = _styled_option(s["name"], detail)
+        options.append(Option(prompt, id=s["name"]))
+    options.append(None)
+    options.append(Option(_styled_option("New session", prefix="\u25c6 "), id="__new__"))
 
-    console.print(f"[bold]Sessions in [cyan]{sandbox_name}[/cyan]:[/bold]")
-    result = inquirer.select(
-        message="",
-        choices=choices,
-        pointer="\u276f",
-        show_cursor=False,
-    ).execute()
+    result = _run_picker(options)
+    if result == "__new__":
+        return None
     return result
 
 
@@ -184,52 +257,50 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
     recent = _collect_recent_sessions(config)
     sandboxes = list(config.state.sandboxes.keys())
 
-    choices = []
+    options: list[Option | None] = []
+    bindings: list[tuple[str, str, str]] = []
 
     # Recent sessions
     if recent:
-        choices.append({"name": "\u2500 Recent sessions \u2500\u2500\u2500", "value": "__sep__", "enabled": False})
+        options.append(None)
         for r in recent:
             detail = _format_detail(r.info)
-            label = f"  {r.sandbox}/{r.tmux_name}"
-            if detail:
-                label += f"  {detail}"
-            choices.append({"name": label, "value": ("attach", r.sandbox, r.tmux_name)})
+            prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail)
+            options.append(Option(prompt, id=f"attach:{r.sandbox}:{r.tmux_name}"))
 
-    # Actions separator
-    if recent:
-        choices.append({"name": "\u2500 Actions \u2500\u2500\u2500", "value": "__sep__", "enabled": False})
-
-    choices.append({
-        "name": f"\u25c6 New sandbox for {dirname}/",
-        "value": ("new",),
-    })
+    # Actions
+    options.append(None)
+    options.append(Option(
+        _styled_option(f"New sandbox for {dirname}/", prefix="\u25c6 "),
+        id="new",
+    ))
+    bindings.append(("n", "pick('new')", "New sandbox"))
 
     if sandboxes:
-        choices.append({
-            "name": "\u25c6 Mount to existing sandbox\u2026",
-            "value": ("mount",),
-        })
-        choices.append({
-            "name": "\u25c6 Mount to existing sandbox (read-only)\u2026",
-            "value": ("mount_ro",),
-        })
+        options.append(Option(
+            _styled_option("Mount to existing sandbox\u2026", prefix="\u25c6 "),
+            id="mount",
+        ))
+        bindings.append(("m", "pick('mount')", "Mount"))
+        options.append(Option(
+            _styled_option("Mount to existing sandbox (read-only)\u2026", prefix="\u25c6 "),
+            id="mount_ro",
+        ))
+        bindings.append(("r", "pick('mount_ro')", "Read-only mount"))
 
     console.print(f"[dim]No sandbox for[/dim] [bold]{cwd}[/bold]")
-    result = inquirer.select(
-        message="",
-        choices=[c for c in choices if c.get("enabled", True) is not False],
-        pointer="\u276f",
-        show_cursor=False,
-    ).execute()
+    result = _run_picker(options, bindings)
 
-    if result[0] == "attach":
-        return AttachSession(sandbox=result[1], session=result[2])
-    elif result[0] == "new":
+    if result is None:
+        raise SystemExit(0)
+    if result.startswith("attach:"):
+        _, sandbox, session = result.split(":", 2)
+        return AttachSession(sandbox=sandbox, session=session)
+    elif result == "new":
         return NewSandbox()
-    elif result[0] == "mount":
+    elif result == "mount":
         return _pick_sandbox_for_mount(config, readonly=False)
-    elif result[0] == "mount_ro":
+    elif result == "mount_ro":
         return _pick_sandbox_for_mount(config, readonly=True)
     # unreachable
     return NewSandbox()
@@ -237,18 +308,14 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
 
 def _pick_sandbox_for_mount(config: Config, readonly: bool = False) -> MountToSandbox:
     """Sub-picker: choose which sandbox to mount CWD into."""
-    choices = []
+    options: list[Option | None] = []
     for name, entry in config.state.sandboxes.items():
         mounts = ", ".join(os.path.basename(m.path) for m in entry.mounts[:3])
-        label = name
-        if mounts:
-            label += f"  ({mounts})"
-        choices.append({"name": label, "value": name})
+        prompt = _styled_option(name, f"({mounts})" if mounts else "")
+        options.append(Option(prompt, id=name))
 
-    result = inquirer.select(
-        message="Mount to:",
-        choices=choices,
-        pointer="\u276f",
-        show_cursor=False,
-    ).execute()
+    console.print("[bold]Mount to:[/bold]")
+    result = _run_picker(options)
+    if result is None:
+        raise SystemExit(0)
     return MountToSandbox(sandbox=result, readonly=readonly)
