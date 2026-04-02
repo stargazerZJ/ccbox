@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from rich.console import Console
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
@@ -99,9 +100,11 @@ def _parse_timestamp(info: dict | None) -> float:
         return 0.0
 
 
-def _styled_option(primary: str, detail: str = "", *, prefix: str = "") -> Text:
-    """Build a Rich Text with optional dim detail."""
+def _styled_option(primary: str, detail: str = "", *, prefix: str = "", key: str = "") -> Text:
+    """Build a Rich Text with optional dim detail and key hint."""
     t = Text()
+    if key:
+        t.append(f"[{key}] ", style="dim")
     if prefix:
         t.append(prefix)
     t.append(primary)
@@ -126,18 +129,21 @@ class _PickerApp(App[str | None]):
     }
     """
     BINDINGS = [
-        ("escape", "quit", "Cancel"),
+        Binding("escape", "quit", "Cancel", priority=True),
+        Binding("backspace", "back", "Back", priority=True),
     ]
 
-    def __init__(self, options: list[Option | None], bindings: list[tuple[str, str, str]] | None = None) -> None:
+    def __init__(self, options: list[Option | None], bindings: list[tuple[str, str, str]] | None = None, *, numbered: bool = True) -> None:
         super().__init__()
         self._options = options
-        # Build id list for number-key shortcuts (selectable options only)
-        self._option_ids = [o.id for o in options if isinstance(o, Option)]
-        extra = list(bindings) if bindings else []
-        # Add 1-9 shortcuts for the first 9 selectable options
-        for i, oid in enumerate(self._option_ids[:9], 1):
-            extra.append((str(i), f"pick('{oid}')", str(i)))
+        extra: list[Binding] = []
+        if bindings:
+            for key, action, desc in bindings:
+                extra.append(Binding(key, action, desc, priority=True))
+        if numbered:
+            option_ids = [o.id for o in options if isinstance(o, Option)]
+            for i, oid in enumerate(option_ids[:9], 1):
+                extra.append(Binding(str(i), f"pick('{oid}')", str(i), priority=True))
         if extra:
             self.BINDINGS = list(self.BINDINGS) + extra
 
@@ -150,26 +156,30 @@ class _PickerApp(App[str | None]):
     def action_quit(self) -> None:
         self.exit(None)
 
+    def action_back(self) -> None:
+        self.exit("__back__")
+
     def action_pick(self, option_id: str) -> None:
         """Shortcut action: select by option id."""
         self.exit(option_id)
 
 
-def _run_picker(options: list[Option | None], bindings: list[tuple[str, str, str]] | None = None) -> str | None:
+def _run_picker(options: list[Option | None], bindings: list[tuple[str, str, str]] | None = None, *, numbered: bool = True) -> str | None:
     """Run an inline picker and return the selected option id.
 
-    Selectable options are automatically numbered 1-9 with keyboard shortcuts.
+    If numbered=True, selectable options get 1-9 digit prefixes and shortcuts.
+    Returns '__back__' on backspace, None on escape.
     """
-    # Prepend number labels to selectable options
-    idx = 0
-    for i, opt in enumerate(options):
-        if isinstance(opt, Option) and idx < 9:
-            idx += 1
-            numbered = Text()
-            numbered.append(f"{idx} ", style="dim")
-            numbered.append_text(opt.prompt if isinstance(opt.prompt, Text) else Text(str(opt.prompt)))
-            options[i] = Option(numbered, id=opt.id)
-    app = _PickerApp(options, bindings)
+    if numbered:
+        idx = 0
+        for i, opt in enumerate(options):
+            if isinstance(opt, Option) and idx < 9:
+                idx += 1
+                labeled = Text()
+                labeled.append(f"{idx} ", style="dim")
+                labeled.append_text(opt.prompt if isinstance(opt.prompt, Text) else Text(str(opt.prompt)))
+                options[i] = Option(labeled, id=opt.id)
+    app = _PickerApp(options, bindings, numbered=numbered)
     return app.run(inline=True)
 
 
@@ -196,15 +206,19 @@ def pick_session(detached: list[dict], sandbox_name: str) -> str | None:
     console.print(f"[bold]Sessions in [cyan]{sandbox_name}[/cyan]:[/bold]")
 
     options: list[Option | None] = []
+    bindings: list[tuple[str, str, str]] = [("n", "pick('__new__')", "New session"), ("q", "pick('__quit__')", "Quit")]
     for s in detached:
         info = _session_info(sandbox_name, s["name"])
         detail = _format_detail(info)
         prompt = _styled_option(s["name"], detail)
         options.append(Option(prompt, id=s["name"]))
     options.append(None)
-    options.append(Option(_styled_option("New session", prefix="\u25c6 "), id="__new__"))
+    options.append(Option(_styled_option("New session", key="n"), id="__new__"))
+    options.append(Option(_styled_option("Quit", key="q"), id="__quit__"))
 
-    result = _run_picker(options)
+    result = _run_picker(options, bindings)
+    if result in (None, "__back__", "__quit__"):
+        raise SystemExit(0)
     if result == "__new__":
         return None
     return result
@@ -257,57 +271,71 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
     recent = _collect_recent_sessions(config)
     sandboxes = list(config.state.sandboxes.keys())
 
-    options: list[Option | None] = []
-    bindings: list[tuple[str, str, str]] = []
-
-    # Recent sessions
-    if recent:
-        options.append(None)
-        for r in recent:
-            detail = _format_detail(r.info)
-            prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail)
-            options.append(Option(prompt, id=f"attach:{r.sandbox}:{r.tmux_name}"))
-
-    # Actions
-    options.append(None)
-    options.append(Option(
-        _styled_option(f"New sandbox for {dirname}/", prefix="\u25c6 "),
-        id="new",
-    ))
-    bindings.append(("n", "pick('new')", "New sandbox"))
-
-    if sandboxes:
-        options.append(Option(
-            _styled_option("Mount to existing sandbox\u2026", prefix="\u25c6 "),
-            id="mount",
-        ))
-        bindings.append(("m", "pick('mount')", "Mount"))
-        options.append(Option(
-            _styled_option("Mount to existing sandbox (read-only)\u2026", prefix="\u25c6 "),
-            id="mount_ro",
-        ))
-        bindings.append(("r", "pick('mount_ro')", "Read-only mount"))
-
     console.print(f"[dim]No sandbox for[/dim] [bold]{cwd}[/bold]")
-    result = _run_picker(options, bindings)
 
-    if result is None:
-        raise SystemExit(0)
-    if result.startswith("attach:"):
-        _, sandbox, session = result.split(":", 2)
-        return AttachSession(sandbox=sandbox, session=session)
-    elif result == "new":
+    while True:
+        options: list[Option | None] = []
+        bindings: list[tuple[str, str, str]] = []
+
+        # Recent sessions
+        if recent:
+            options.append(None)
+            for idx, r in enumerate(recent):
+                detail = _format_detail(r.info)
+                oid = f"attach:{r.sandbox}:{r.tmux_name}"
+                prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail, key=str(idx + 1))
+                options.append(Option(prompt, id=oid))
+                if idx < 9:
+                    bindings.append((str(idx + 1), f"pick('{oid}')", str(idx + 1)))
+
+        # Actions
+        options.append(None)
+        options.append(Option(
+            _styled_option(f"New sandbox for {dirname}/", key="n"),
+            id="new",
+        ))
+        bindings.append(("n", "pick('new')", "New sandbox"))
+
+        if sandboxes:
+            options.append(Option(
+                _styled_option("Mount to existing sandbox\u2026", key="m"),
+                id="mount",
+            ))
+            bindings.append(("m", "pick('mount')", "Mount"))
+            options.append(Option(
+                _styled_option("Mount to existing sandbox (read-only)\u2026", key="r"),
+                id="mount_ro",
+            ))
+            bindings.append(("r", "pick('mount_ro')", "Read-only mount"))
+
+        options.append(Option(
+            _styled_option("Quit", key="q"),
+            id="__quit__",
+        ))
+        bindings.append(("q", "pick('__quit__')", "Quit"))
+
+        result = _run_picker(options, bindings, numbered=False)
+
+        if result in (None, "__back__", "__quit__"):
+            raise SystemExit(0)
+        if result.startswith("attach:"):
+            _, sandbox, session = result.split(":", 2)
+            return AttachSession(sandbox=sandbox, session=session)
+        elif result == "new":
+            return NewSandbox()
+        elif result in ("mount", "mount_ro"):
+            readonly = result == "mount_ro"
+            mount_result = _pick_sandbox_for_mount(config, readonly=readonly)
+            if mount_result is not None:
+                return mount_result
+            # __back__ from sub-picker: loop to show main menu again
+            continue
+        # unreachable
         return NewSandbox()
-    elif result == "mount":
-        return _pick_sandbox_for_mount(config, readonly=False)
-    elif result == "mount_ro":
-        return _pick_sandbox_for_mount(config, readonly=True)
-    # unreachable
-    return NewSandbox()
 
 
-def _pick_sandbox_for_mount(config: Config, readonly: bool = False) -> MountToSandbox:
-    """Sub-picker: choose which sandbox to mount CWD into."""
+def _pick_sandbox_for_mount(config: Config, readonly: bool = False) -> MountToSandbox | None:
+    """Sub-picker: choose which sandbox to mount CWD into. Returns None on back."""
     options: list[Option | None] = []
     for name, entry in config.state.sandboxes.items():
         mounts = ", ".join(os.path.basename(m.path) for m in entry.mounts[:3])
@@ -318,4 +346,6 @@ def _pick_sandbox_for_mount(config: Config, readonly: bool = False) -> MountToSa
     result = _run_picker(options)
     if result is None:
         raise SystemExit(0)
+    if result == "__back__":
+        return None
     return MountToSandbox(sandbox=result, readonly=readonly)
