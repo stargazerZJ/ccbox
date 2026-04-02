@@ -53,6 +53,7 @@ class RecentSession:
     tmux_name: str
     container: str
     info: dict | None  # from read_session_info_any
+    attached: bool = False
 
 
 def _session_info(sandbox_name: str, tmux_session: str) -> dict | None:
@@ -247,8 +248,7 @@ def _collect_recent_sessions(config: Config) -> list[RecentSession]:
         if state != "Running":
             continue
         # Get live tmux sessions to filter out stale links
-        live_sessions = {s["name"] for s in list_sessions(entry.container)
-                         if not s["attached"]}
+        live_sessions = {s["name"]: s["attached"] for s in list_sessions(entry.container)}
         for link_file in sandbox_dir.iterdir():
             tmux_name = link_file.name
             if tmux_name not in live_sessions:
@@ -259,6 +259,7 @@ def _collect_recent_sessions(config: Config) -> list[RecentSession]:
                 tmux_name=tmux_name,
                 container=entry.container,
                 info=info,
+                attached=live_sessions[tmux_name],
             ))
 
     # Sort by recency (most recent first)
@@ -286,6 +287,8 @@ def pick_no_resolve(config: Config, cwd: str) -> PickResult:
             options.append(None)
             for idx, r in enumerate(recent):
                 detail = _format_detail(r.info)
+                if r.attached:
+                    detail = f"(attached)  {detail}" if detail else "(attached)"
                 oid = f"attach:{r.sandbox}:{r.tmux_name}"
                 prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail, key=str(idx + 1), dim_primary=bool(detail))
                 options.append(Option(prompt, id=oid))
@@ -354,3 +357,33 @@ def _pick_sandbox_for_mount(config: Config, readonly: bool = False) -> MountToSa
     if result == "__back__":
         return None
     return MountToSandbox(sandbox=result, readonly=readonly)
+
+
+def pick_session_all(config: Config) -> AttachSession | None:
+    """Pick a session from all sandboxes. Returns AttachSession or None."""
+    recent = _collect_recent_sessions(config)
+    if not recent:
+        console.print("No sessions in any sandbox.")
+        return None
+
+    console.print("[bold]All sessions:[/bold]")
+
+    options: list[Option | None] = []
+    shortcuts: dict[str, str] = {"q": "__quit__"}
+    for idx, r in enumerate(recent):
+        detail = _format_detail(r.info)
+        if r.attached:
+            detail = f"(attached)  {detail}" if detail else "(attached)"
+        oid = f"attach:{r.sandbox}:{r.tmux_name}"
+        prompt = _styled_option(f"{r.sandbox}/{r.tmux_name}", detail, dim_primary=bool(detail))
+        options.append(Option(prompt, id=oid))
+    options.append(None)
+    options.append(Option(_styled_option("Quit", key="q"), id="__quit__"))
+
+    result = _run_picker(options, shortcuts)
+    if result in (None, "__back__", "__quit__"):
+        return None
+    if result.startswith("attach:"):
+        _, sandbox, session = result.split(":", 2)
+        return AttachSession(sandbox=sandbox, session=session)
+    return None

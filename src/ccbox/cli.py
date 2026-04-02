@@ -43,6 +43,7 @@ from ccbox.picker import (
     NewSandbox,
     pick_no_resolve,
     pick_session,
+    pick_session_all,
 )
 from ccbox import lxd
 
@@ -284,8 +285,17 @@ def cmd_unmount(config: Config, args: argparse.Namespace) -> None:
 
 
 def cmd_sessions(config: Config, args: argparse.Namespace) -> None:
-    """List sessions in a sandbox."""
-    sandbox_name = resolve_sandbox(config, args.sandbox)
+    """List sessions in a sandbox (or all sandboxes with -a)."""
+    if args.all:
+        _cmd_sessions_all(config)
+        return
+    try:
+        sandbox_name = resolve_sandbox(config, args.sandbox)
+    except ValueError:
+        if args.sandbox is None:
+            print("No sandbox found for current directory. Use -a to list all.", file=sys.stderr)
+            raise SystemExit(1)
+        raise
     container = ensure_running(config, sandbox_name)
     sessions = list_sessions(container)
 
@@ -299,9 +309,40 @@ def cmd_sessions(config: Config, args: argparse.Namespace) -> None:
         print(_format_session_line(i, s["name"], info, attached=s["attached"]))
 
 
+def _cmd_sessions_all(config: Config) -> None:
+    """List sessions across all sandboxes."""
+    from ccbox import lxd as _lxd
+
+    total = 0
+    for name, entry in config.state.sandboxes.items():
+        state = _lxd.container_state(entry.container)
+        if state != "Running":
+            continue
+        sessions = list_sessions(entry.container)
+        if not sessions:
+            continue
+        print(f"{name}:")
+        for i, s in enumerate(sessions):
+            info = _session_info(name, s["name"])
+            print(_format_session_line(i, s["name"], info, attached=s["attached"]))
+        total += len(sessions)
+        print()
+    if total == 0:
+        print("No sessions in any sandbox.")
+
+
 def cmd_attach(config: Config, args: argparse.Namespace) -> None:
     """Attach to a session."""
-    sandbox_name = resolve_sandbox(config, args.sandbox)
+    if getattr(args, "all", False) and args.session is None:
+        _cmd_attach_all(config)
+        return
+    try:
+        sandbox_name = resolve_sandbox(config, args.sandbox)
+    except ValueError:
+        if args.sandbox is None:
+            print("No sandbox found for current directory. Use -a to pick from all.", file=sys.stderr)
+            raise SystemExit(1)
+        raise
     container = ensure_running(config, sandbox_name)
     if args.session is not None:
         session_name = resolve_session(container, args.session)
@@ -313,6 +354,17 @@ def cmd_attach(config: Config, args: argparse.Namespace) -> None:
             print("No session selected.")
             return
     attach_session(container, session_name)
+
+
+def _cmd_attach_all(config: Config) -> None:
+    """Pick a session from all sandboxes and attach."""
+    from ccbox.picker import pick_session_all
+    result = pick_session_all(config)
+    if result is None:
+        print("No session selected.")
+        return
+    container = ensure_running(config, result.sandbox)
+    attach_session(container, result.session)
 
 
 def cmd_kill(config: Config, args: argparse.Namespace) -> None:
@@ -600,16 +652,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_unmount.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
                            help="Sandbox name (default: auto from CWD)")
 
-    # ccbox sessions [-s SANDBOX]
+    # ccbox sessions [-s SANDBOX] [-a]
     p_sessions = sub.add_parser("sessions", help="List sessions")
     p_sessions.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
                             help="Sandbox name (default: auto from CWD)")
+    p_sessions.add_argument("-a", "--all", action="store_true",
+                            help="List sessions across all sandboxes")
 
-    # ccbox attach [session] [-s SANDBOX]
+    # ccbox attach [session] [-s SANDBOX] [-a]
     p_attach = sub.add_parser("attach", help="Attach to a session")
     p_attach.add_argument("session", nargs="?", default=None, help="Session name (picker if omitted)")
     p_attach.add_argument("-s", "--sandbox", default=None, metavar="SANDBOX",
                           help="Sandbox name (default: auto from CWD)")
+    p_attach.add_argument("-a", "--all", action="store_true",
+                          help="Pick from sessions across all sandboxes")
 
     # ccbox kill [session] [--all] [-s SANDBOX]
     p_kill = sub.add_parser("kill", help="Kill session(s)")
