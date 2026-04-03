@@ -14,7 +14,6 @@ from textual.widgets.option_list import Option
 
 from ccbox import lxd
 from ccbox.config import SESSION_LINK_DIR, Config
-from ccbox.session import list_sessions
 from ccbox.transcript import read_session_info_any, relative_time
 
 console = Console()
@@ -322,12 +321,9 @@ def _collect_recent_sessions(config: Config) -> list[RecentSession]:
         # Only check running containers
         if container_states.get(entry.container) != "Running":
             continue
-        # Get live tmux sessions to filter out stale links
-        live_sessions = {s["name"]: s["attached"] for s in list_sessions(entry.container)}
+        # Trust session-link cache — no lxc exec needed
         for link_file in sandbox_dir.iterdir():
             tmux_name = link_file.name
-            if tmux_name not in live_sessions:
-                continue
             info = _session_info(sandbox_name, tmux_name)
             results.append(
                 RecentSession(
@@ -335,7 +331,7 @@ def _collect_recent_sessions(config: Config) -> list[RecentSession]:
                     tmux_name=tmux_name,
                     container=entry.container,
                     info=info,
-                    attached=live_sessions[tmux_name],
+                    attached=False,  # cache doesn't track attached state
                 )
             )
 

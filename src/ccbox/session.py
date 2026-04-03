@@ -11,6 +11,20 @@ CONTAINER_USER = "1000"  # UID for the mapped user
 TMUX_CONF = "/etc/tmux.conf"
 
 
+def cached_session_names(sandbox_name: str) -> list[str]:
+    """List session names from session-link cache (no lxc calls).
+
+    Returns session names that have link files. May include stale entries
+    if a session exited without cleanup, but is fast (local filesystem only).
+    """
+    from ccbox.config import SESSION_LINK_DIR
+
+    link_dir = SESSION_LINK_DIR / sandbox_name
+    if not link_dir.is_dir():
+        return []
+    return [f.name for f in link_dir.iterdir()]
+
+
 def list_sessions(container: str) -> list[dict]:
     """List tmux sessions inside the container.
 
@@ -113,6 +127,8 @@ def create_session(
         cwd=cwd,
         env=env,
         command=command,
+        session_link_dir=str(SESSION_LINK_DIR) if sandbox_name else None,
+        sandbox_name=sandbox_name,
     )
 
     r = lxd.exec_cmd(
@@ -138,6 +154,8 @@ def _build_session_script(
     cwd: str | None,
     env: dict[str, str],
     command: str,
+    session_link_dir: str | None = None,
+    sandbox_name: str | None = None,
 ) -> str:
     """Build a shell script that creates and configures a tmux session.
 
@@ -162,6 +180,16 @@ def _build_session_script(
     if cwd:
         new_cmd += f" -c {shlex.quote(cwd)}"
     lines.append(new_cmd)
+
+    # Hook: clean up session-link file when tmux session exits naturally.
+    # The link dir is on an rw mount (identity-mapped paths), so rm works
+    # directly from inside the container.
+    # We build the full link path into a shell var, then embed it literally
+    # in the tmux hook so there are no quoting issues at hook-fire time.
+    if session_link_dir and sandbox_name:
+        link_dir = f"{session_link_dir}/{sandbox_name}"
+        lines.append(f'_link="{link_dir}/$name"')
+        lines.append('tmux set-hook -t "$name" session-closed "run-shell \'rm -f $_link\'"')
 
     # Inject env vars via tmux set-environment (includes CCBOX_TMUX_SESSION)
     env["CCBOX_TMUX_SESSION"] = "$name"  # resolved by the shell

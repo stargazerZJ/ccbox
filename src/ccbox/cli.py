@@ -314,43 +314,41 @@ def cmd_sessions(config: Config, args: argparse.Namespace) -> None:
             )
             raise SystemExit(1) from None
         raise
-    container = ensure_running(config, sandbox_name)
-    sessions = list_sessions(container)
+    from ccbox.session import cached_session_names
 
-    if not sessions:
+    session_names = cached_session_names(sandbox_name)
+
+    if not session_names:
         print(f"No sessions in sandbox '{sandbox_name}'.")
         return
 
     print(f"Sessions in sandbox '{sandbox_name}':")
-    for i, s in enumerate(sessions):
-        info = _session_info(sandbox_name, s["name"])
-        print(_format_session_line(i, s["name"], info, attached=s["attached"]))
+    for i, sname in enumerate(session_names):
+        info = _session_info(sandbox_name, sname)
+        print(_format_session_line(i, sname, info))
 
 
 def _cmd_sessions_all(config: Config) -> None:
     """List sessions across all sandboxes."""
     from ccbox import lxd as _lxd
+    from ccbox.session import cached_session_names
 
     # Batch-fetch all container states in one API call
     container_states = _lxd.all_container_states()
 
-    # Only check sandboxes that have session-link files AND are running
+    # Use session-link cache — no lxc exec calls needed
     total = 0
     for name, entry in config.state.sandboxes.items():
         if container_states.get(entry.container) != "Running":
             continue
-        # Check session-links first to avoid lxc exec on sandboxes with no sessions
-        link_dir = SESSION_LINK_DIR / name
-        if not link_dir.is_dir() or not any(link_dir.iterdir()):
-            continue
-        sessions = list_sessions(entry.container)
-        if not sessions:
+        session_names = cached_session_names(name)
+        if not session_names:
             continue
         print(f"{name}:")
-        for i, s in enumerate(sessions):
-            info = _session_info(name, s["name"])
-            print(_format_session_line(i, f"{name}/{s['name']}", info, attached=s["attached"]))
-        total += len(sessions)
+        for i, sname in enumerate(session_names):
+            info = _session_info(name, sname)
+            print(_format_session_line(i, f"{name}/{sname}", info))
+        total += len(session_names)
         print()
     if total == 0:
         print("No sessions in any sandbox.")
