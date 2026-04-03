@@ -141,10 +141,6 @@ def create_session(
     # Session name is the last line of output
     name = r.stdout.strip().rsplit("\n", 1)[-1]
 
-    # Clear stale session-link pointer (previous session in this tmux slot)
-    if sandbox_name is not None:
-        (SESSION_LINK_DIR / sandbox_name / name).unlink(missing_ok=True)
-
     return name
 
 
@@ -189,6 +185,9 @@ def _build_session_script(
     if session_link_dir and sandbox_name:
         link_dir = f"{session_link_dir}/{sandbox_name}"
         lines.append(f'_link="{link_dir}/$name"')
+        # Remove stale link from a previous session in this slot before Claude
+        # starts — avoids racing with the SessionStart hook that writes the new link.
+        lines.append('rm -f "$_link"')
         lines.append('tmux set-hook -t "$name" session-closed "run-shell \'rm -f $_link\'"')
 
     # Inject env vars via tmux set-environment (includes CCBOX_TMUX_SESSION)
