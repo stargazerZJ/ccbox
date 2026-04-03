@@ -196,22 +196,55 @@ def attach_session(container: str, session_name: str) -> None:
     )
 
 
-def kill_session(container: str, name: str) -> None:
+def kill_session(container: str, name: str, *, sandbox_name: str | None = None) -> None:
     lxd.exec_cmd(
         container,
         ["tmux", "kill-session", "-t", name],
         user=CONTAINER_USER,
         check=False,
     )
+    if sandbox_name is not None:
+        _clean_session_link(sandbox_name, name)
 
 
-def kill_all_sessions(container: str) -> None:
+def kill_all_sessions(container: str, *, sandbox_name: str | None = None) -> None:
     lxd.exec_cmd(
         container,
         ["tmux", "kill-server"],
         user=CONTAINER_USER,
         check=False,
     )
+    if sandbox_name is not None:
+        _clean_session_links(sandbox_name)
+
+
+def clean_session_links(sandbox_name: str) -> None:
+    """Remove all session-link files for a sandbox (e.g. on stop/remove)."""
+    _clean_session_links(sandbox_name)
+
+
+def _clean_session_link(sandbox_name: str, session_name: str) -> None:
+    """Remove a single session-link file."""
+    import shutil
+
+    from ccbox.config import SESSION_LINK_DIR
+
+    (SESSION_LINK_DIR / sandbox_name / session_name).unlink(missing_ok=True)
+    # Remove sandbox dir if now empty
+    sandbox_dir = SESSION_LINK_DIR / sandbox_name
+    if sandbox_dir.is_dir() and not any(sandbox_dir.iterdir()):
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+
+
+def _clean_session_links(sandbox_name: str) -> None:
+    """Remove all session-link files for a sandbox."""
+    import shutil
+
+    from ccbox.config import SESSION_LINK_DIR
+
+    sandbox_dir = SESSION_LINK_DIR / sandbox_name
+    if sandbox_dir.is_dir():
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
 
 
 def build_claude_command(extra_args: list[str] | None = None) -> str:

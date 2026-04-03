@@ -1,12 +1,27 @@
-"""Low-level LXD command wrappers. All LXC interaction goes through this module."""
+"""Low-level LXD command wrappers. All LXC interaction goes through this module.
+
+Uses pylxd (REST API over Unix socket) for fast queries, and the lxc CLI for exec
+and device/config operations where pylxd is slower or less convenient.
+"""
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 
+import pylxd
+
 LXC = "/snap/bin/lxc"
+
+_client: pylxd.Client | None = None
+
+
+def _get_client() -> pylxd.Client:
+    """Return a lazily-initialized pylxd client."""
+    global _client
+    if _client is None:
+        _client = pylxd.Client()
+    return _client
 
 
 def run_lxc(
@@ -25,19 +40,32 @@ def run_lxc(
 
 
 def container_exists(name: str) -> bool:
-    r = run_lxc("info", name, check=False, capture=True)
-    return r.returncode == 0
+    try:
+        _get_client().instances.get(name)
+        return True
+    except pylxd.exceptions.NotFound:
+        return False
 
 
 def container_state(name: str) -> str:
     """Return 'Running', 'Stopped', or 'NotFound'."""
-    r = run_lxc("info", name, check=False, capture=True)
-    if r.returncode != 0:
+    try:
+        inst = _get_client().instances.get(name)
+        return inst.status.capitalize()
+    except pylxd.exceptions.NotFound:
         return "NotFound"
-    for line in r.stdout.splitlines():
-        if line.startswith("Status:"):
-            return line.split(":", 1)[1].strip().capitalize()
-    return "NotFound"
+
+
+def all_container_states(prefix: str = "ccbox-") -> dict[str, str]:
+    """Return {container_name: state} for all containers matching prefix.
+
+    Single API call — much faster than calling container_state() per container.
+    """
+    states = {}
+    for inst in _get_client().instances.all():
+        if inst.name.startswith(prefix):
+            states[inst.name] = inst.status.capitalize()
+    return states
 
 
 def init_container(image: str, name: str, *, storage: str | None = None) -> None:
@@ -162,14 +190,11 @@ def publish(container: str, alias: str, force: bool = False) -> None:
 
 
 def image_exists(alias: str) -> bool:
-    r = run_lxc("image", "info", alias, check=False, capture=True)
-    return r.returncode == 0
-
-
-def list_containers(prefix: str = "ccbox-") -> list[dict]:
-    """List containers matching prefix. Returns parsed JSON."""
-    r = run_lxc("list", f"^{prefix}", "--format=json", capture=True)
-    return json.loads(r.stdout)
+    try:
+        _get_client().images.get_by_alias(alias)
+        return True
+    except pylxd.exceptions.NotFound:
+        return False
 
 
 def add_proxy_device(

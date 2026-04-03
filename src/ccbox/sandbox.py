@@ -7,7 +7,7 @@ import os
 import sys
 
 from ccbox import lxd
-from ccbox.config import Config, SandboxEntry
+from ccbox.config import SESSION_LINK_DIR, Config, SandboxEntry
 from ccbox.mount import (
     add_auto_mounts,
     add_mount,
@@ -138,6 +138,10 @@ def stop_sandbox(config: Config, name: str) -> None:
     state = lxd.container_state(entry.container)
     if state == "Running":
         lxd.stop(entry.container)
+    # All tmux sessions die on stop — clean up links
+    from ccbox.session import clean_session_links
+
+    clean_session_links(name)
 
 
 def remove_sandbox(config: Config, name: str) -> None:
@@ -148,6 +152,10 @@ def remove_sandbox(config: Config, name: str) -> None:
     if lxd.container_exists(entry.container):
         lxd.delete(entry.container, force=True)
     config.remove_sandbox(name)
+    # Clean up session links
+    from ccbox.session import clean_session_links
+
+    clean_session_links(name)
 
 
 def list_sandboxes(config: Config) -> list[dict]:
@@ -155,16 +163,22 @@ def list_sandboxes(config: Config) -> list[dict]:
 
     Detects state/LXD mismatches (container deleted externally).
     """
+    # Batch-fetch all container states in one API call
+    container_states = lxd.all_container_states()
+
     result = []
     stale = []
     for name, entry in config.state.sandboxes.items():
-        state = lxd.container_state(entry.container)
+        state = container_states.get(entry.container, "NotFound")
         if state == "NotFound":
             stale.append(name)
             continue
         sessions = 0
         if state == "Running":
-            sessions = len(list_sessions(entry.container))
+            # Use session-link files as fast session count (avoids lxc exec)
+            link_dir = SESSION_LINK_DIR / name
+            if link_dir.is_dir():
+                sessions = sum(1 for _ in link_dir.iterdir())
         result.append(
             {
                 "name": name,

@@ -7,6 +7,7 @@ name = "ccbox"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "pylxd>=2.4.0",
     "rich",
     "textual>=0.55.0",
 ]

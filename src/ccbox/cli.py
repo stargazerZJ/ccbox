@@ -331,10 +331,17 @@ def _cmd_sessions_all(config: Config) -> None:
     """List sessions across all sandboxes."""
     from ccbox import lxd as _lxd
 
+    # Batch-fetch all container states in one API call
+    container_states = _lxd.all_container_states()
+
+    # Only check sandboxes that have session-link files AND are running
     total = 0
     for name, entry in config.state.sandboxes.items():
-        state = _lxd.container_state(entry.container)
-        if state != "Running":
+        if container_states.get(entry.container) != "Running":
+            continue
+        # Check session-links first to avoid lxc exec on sandboxes with no sessions
+        link_dir = SESSION_LINK_DIR / name
+        if not link_dir.is_dir() or not any(link_dir.iterdir()):
             continue
         sessions = list_sessions(entry.container)
         if not sessions:
@@ -407,11 +414,11 @@ def cmd_kill(config: Config, args: argparse.Namespace) -> None:
     container = ensure_running(config, sandbox_name)
 
     if args.all:
-        kill_all_sessions(container)
+        kill_all_sessions(container, sandbox_name=sandbox_name)
         print(f"All sessions killed in sandbox '{sandbox_name}'.")
     else:
         session_name = resolve_session(container, args.session)
-        kill_session(container, session_name)
+        kill_session(container, session_name, sandbox_name=sandbox_name)
         print(f"Session '{session_name}' killed.")
 
 

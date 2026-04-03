@@ -309,6 +309,9 @@ def _collect_recent_sessions(config: Config) -> list[RecentSession]:
     if not SESSION_LINK_DIR.is_dir():
         return results
 
+    # Batch-fetch all container states in one API call
+    container_states = lxd.all_container_states()
+
     for sandbox_dir in SESSION_LINK_DIR.iterdir():
         if not sandbox_dir.is_dir():
             continue
@@ -316,9 +319,8 @@ def _collect_recent_sessions(config: Config) -> list[RecentSession]:
         entry = config.get_sandbox(sandbox_name)
         if entry is None:
             continue
-        # Only check running containers to avoid startup latency
-        state = lxd.container_state(entry.container)
-        if state != "Running":
+        # Only check running containers
+        if container_states.get(entry.container) != "Running":
             continue
         # Get live tmux sessions to filter out stale links
         live_sessions = {s["name"]: s["attached"] for s in list_sessions(entry.container)}
