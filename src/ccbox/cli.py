@@ -34,6 +34,7 @@ from ccbox.sandbox import (
     stop_sandbox,
 )
 from ccbox.session import (
+    _is_session_attached,
     attach_session,
     build_claude_command,
     build_codex_command,
@@ -341,6 +342,20 @@ def cmd_sessions(config: Config, args: argparse.Namespace) -> None:
     for i, s in enumerate(sessions):
         info = _session_info(sandbox_name, s["name"])
         print(_format_session_line(i, s["name"], info, attached=s["attached"]))
+        # Warn on mismatch between live tmux state and .attached marker files
+        cached_attached = _is_session_attached(sandbox_name, s["name"])
+        if s["attached"] and not cached_attached:
+            print(
+                "    [warn] tmux says attached but no .attached marker — "
+                "session may be attached outside ccbox",
+                file=sys.stderr,
+            )
+        elif not s["attached"] and cached_attached:
+            print(
+                "    [warn] tmux says detached but stale .attached marker exists — "
+                "ccbox may have crashed without cleanup",
+                file=sys.stderr,
+            )
 
 
 def _cmd_sessions_all(config: Config) -> None:
