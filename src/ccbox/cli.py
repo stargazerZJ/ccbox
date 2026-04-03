@@ -37,6 +37,8 @@ from ccbox.session import (
     attach_session,
     build_claude_command,
     build_codex_command,
+    cached_sessions_with_state,
+    clean_session_link,
     create_session,
     get_forwarded_env,
     kill_all_sessions,
@@ -142,6 +144,15 @@ def _format_session_line(
     return f"  [{index}] {tmux_name} ({status})  {detail}"
 
 
+def cmd_session_cleanup(config: Config, args: argparse.Namespace) -> None:
+    """Internal: called by session shell to clean up session-link on natural exit."""
+    sandbox = os.environ.get("CCBOX_SANDBOX", "")
+    tmux_session = os.environ.get("CCBOX_TMUX_SESSION", "")
+    if not sandbox or not tmux_session:
+        return  # no-op outside ccbox containers
+    clean_session_link(sandbox, tmux_session)
+
+
 def cmd_session_link(config: Config, args: argparse.Namespace) -> None:
     """Internal: called by SessionStart hook to link tmux↔transcript session."""
     import json as _json
@@ -191,18 +202,18 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
 
         chosen = pick_session(sessions, sandbox_name)
         if chosen is not None:
-            attach_session(container, chosen)
+            attach_session(container, chosen, sandbox_name=sandbox_name)
         else:
             cmd = build_claude_command()
             name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
-            attach_session(container, name)
+            attach_session(container, name, sandbox_name=sandbox_name)
     else:
         # CWD doesn't resolve — show unified picker
         result = pick_no_resolve(config, cwd)
 
         if isinstance(result, AttachSession):
             container = ensure_running(config, result.sandbox)
-            attach_session(container, result.session)
+            attach_session(container, result.session, sandbox_name=result.sandbox)
         elif isinstance(result, NewSandbox):
             sandbox_name = result.name
             # Deduplicate name if it already exists
@@ -217,7 +228,7 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
             container = ensure_running(config, sandbox_name)
             cmd = build_claude_command()
             name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
-            attach_session(container, name)
+            attach_session(container, name, sandbox_name=sandbox_name)
         elif isinstance(result, MountToSandbox):
             from ccbox.mount import add_mount
 
@@ -225,7 +236,7 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
             container = ensure_running(config, result.sandbox)
             cmd = build_claude_command()
             name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=result.sandbox)
-            attach_session(container, name)
+            attach_session(container, name, sandbox_name=result.sandbox)
 
 
 def cmd_claude(config: Config, args: argparse.Namespace) -> None:
@@ -241,7 +252,7 @@ def cmd_claude(config: Config, args: argparse.Namespace) -> None:
         claude_args = claude_args[1:]
     cmd = build_claude_command(claude_args)
     name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
-    attach_session(container, name)
+    attach_session(container, name, sandbox_name=sandbox_name)
 
 
 def cmd_codex(config: Config, args: argparse.Namespace) -> None:
@@ -257,7 +268,7 @@ def cmd_codex(config: Config, args: argparse.Namespace) -> None:
         codex_args = codex_args[1:]
     cmd = build_codex_command(codex_args)
     name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
-    attach_session(container, name)
+    attach_session(container, name, sandbox_name=sandbox_name)
 
 
 def cmd_ls(config: Config, args: argparse.Namespace) -> None:
@@ -314,41 +325,44 @@ def cmd_sessions(config: Config, args: argparse.Namespace) -> None:
             )
             raise SystemExit(1) from None
         raise
-    from ccbox.session import cached_session_names
+    entry = config.get_sandbox(sandbox_name)
+    if entry is None:
+        print(f"No sessions in sandbox '{sandbox_name}'.")
+        return
 
-    session_names = cached_session_names(sandbox_name)
+    # Live tmux query for accurate attached state
+    sessions = list_sessions(entry.container)
 
-    if not session_names:
+    if not sessions:
         print(f"No sessions in sandbox '{sandbox_name}'.")
         return
 
     print(f"Sessions in sandbox '{sandbox_name}':")
-    for i, sname in enumerate(session_names):
-        info = _session_info(sandbox_name, sname)
-        print(_format_session_line(i, sname, info))
+    for i, s in enumerate(sessions):
+        info = _session_info(sandbox_name, s["name"])
+        print(_format_session_line(i, s["name"], info, attached=s["attached"]))
 
 
 def _cmd_sessions_all(config: Config) -> None:
     """List sessions across all sandboxes."""
     from ccbox import lxd as _lxd
-    from ccbox.session import cached_session_names
 
     # Batch-fetch all container states in one API call
     container_states = _lxd.all_container_states()
 
-    # Use session-link cache — no lxc exec calls needed
+    # Use session-link cache with .attached markers — no lxc exec calls needed
     total = 0
     for name, entry in config.state.sandboxes.items():
         if container_states.get(entry.container) != "Running":
             continue
-        session_names = cached_session_names(name)
-        if not session_names:
+        sessions = cached_sessions_with_state(name)
+        if not sessions:
             continue
         print(f"{name}:")
-        for i, sname in enumerate(session_names):
-            info = _session_info(name, sname)
-            print(_format_session_line(i, f"{name}/{sname}", info))
-        total += len(session_names)
+        for i, s in enumerate(sessions):
+            info = _session_info(name, s["name"])
+            print(_format_session_line(i, f"{name}/{s['name']}", info, attached=s["attached"]))
+        total += len(sessions)
         print()
     if total == 0:
         print("No sessions in any sandbox.")
@@ -386,7 +400,7 @@ def cmd_attach(config: Config, args: argparse.Namespace) -> None:
             # User chose "new session" — not applicable for attach
             print("No session selected.")
             return
-    attach_session(container, session_name)
+    attach_session(container, session_name, sandbox_name=sandbox_name)
 
 
 def _cmd_attach_all(config: Config) -> None:
@@ -396,7 +410,7 @@ def _cmd_attach_all(config: Config) -> None:
         print("No session selected.")
         return
     container = ensure_running(config, result.sandbox)
-    attach_session(container, result.session)
+    attach_session(container, result.session, sandbox_name=result.sandbox)
 
 
 def cmd_kill(config: Config, args: argparse.Namespace) -> None:
@@ -957,6 +971,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ccbox _session-link  (internal: Claude hook)
     sub.add_parser("_session-link", help=argparse.SUPPRESS)
 
+    # ccbox _session-cleanup  (internal: called by pane shell on natural exit)
+    sub.add_parser("_session-cleanup", help=argparse.SUPPRESS)
+
     return parser
 
 
@@ -981,6 +998,7 @@ COMMAND_MAP = {
     "resolve": cmd_resolve,
     "config": cmd_config,
     "_session-link": cmd_session_link,
+    "_session-cleanup": cmd_session_cleanup,
 }
 
 

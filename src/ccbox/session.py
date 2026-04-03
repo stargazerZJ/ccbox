@@ -22,7 +22,24 @@ def cached_session_names(sandbox_name: str) -> list[str]:
     link_dir = SESSION_LINK_DIR / sandbox_name
     if not link_dir.is_dir():
         return []
-    return [f.name for f in link_dir.iterdir()]
+    return [f.name for f in link_dir.iterdir() if ".attached" not in f.name]
+
+
+def cached_sessions_with_state(sandbox_name: str) -> list[dict]:
+    """Like cached_session_names but includes attached state from per-PID marker files.
+
+    Returns list of dicts with keys: name, attached.
+    """
+    from ccbox.config import SESSION_LINK_DIR
+
+    link_dir = SESSION_LINK_DIR / sandbox_name
+    if not link_dir.is_dir():
+        return []
+    results = []
+    for f in link_dir.iterdir():
+        if ".attached" not in f.name:
+            results.append({"name": f.name, "attached": _is_session_attached(sandbox_name, f.name)})
+    return results
 
 
 def list_sessions(container: str) -> list[dict]:
@@ -205,8 +222,14 @@ def _build_session_script(
         respawn += f" -c {shlex.quote(cwd)}"
     lines.append(respawn)
 
-    # exec replaces bash — exiting the command kills the tmux session
-    lines.append(f'tmux send-keys -t "$name" {shlex.quote(f"exec {command}")} Enter')
+    # exec replaces bash — exiting the command kills the tmux session.
+    # When session_link_dir is set, use inline cleanup so the link is removed
+    # even when the tmux server shuts down (session-closed hook is unreliable then).
+    if session_link_dir and sandbox_name:
+        send_cmd = f"{command}; ccbox _session-cleanup; exit"
+    else:
+        send_cmd = f"exec {command}"
+    lines.append(f'tmux send-keys -t "$name" {shlex.quote(send_cmd)} Enter')
 
     # Output session name for the caller to parse
     lines.append('printf "%s" "$name"')
@@ -214,13 +237,24 @@ def _build_session_script(
     return "\n".join(lines)
 
 
-def attach_session(container: str, session_name: str) -> None:
-    """Attach to an existing tmux session (interactive, inherited stdio)."""
-    lxd.exec_interactive(
-        container,
-        ["tmux", "-f", TMUX_CONF, "attach-session", "-t", session_name],
-        user=CONTAINER_USER,
-    )
+def attach_session(container: str, session_name: str, *, sandbox_name: str | None = None) -> None:
+    """Attach to an existing tmux session (interactive, inherited stdio).
+
+    If sandbox_name is provided, creates a per-PID .attached.{pid} marker while
+    attached and removes it on detach/exit so the cache reflects live state.
+    Multiple concurrent attaches each hold their own marker.
+    """
+    if sandbox_name is not None:
+        _attached_marker(sandbox_name, session_name).touch()
+    try:
+        lxd.exec_interactive(
+            container,
+            ["tmux", "-f", TMUX_CONF, "attach-session", "-t", session_name],
+            user=CONTAINER_USER,
+        )
+    finally:
+        if sandbox_name is not None:
+            _attached_marker(sandbox_name, session_name).unlink(missing_ok=True)
 
 
 def kill_session(container: str, name: str, *, sandbox_name: str | None = None) -> None:
@@ -250,15 +284,47 @@ def clean_session_links(sandbox_name: str) -> None:
     _clean_session_links(sandbox_name)
 
 
+def clean_session_link(sandbox_name: str, session_name: str) -> None:
+    """Remove a single session-link file and its .attached marker."""
+    _clean_session_link(sandbox_name, session_name)
+
+
+def _attached_marker(sandbox_name: str, session_name: str):
+    """Path to the per-PID .attached marker for this attach instance.
+
+    Each attaching process creates its own marker; 'attached' means any exist.
+    """
+    from ccbox.config import SESSION_LINK_DIR
+
+    return SESSION_LINK_DIR / sandbox_name / f"{session_name}.attached.{os.getpid()}"
+
+
+def _is_session_attached(sandbox_name: str, session_name: str) -> bool:
+    """Check if any process currently has this session attached."""
+    from ccbox.config import SESSION_LINK_DIR
+
+    link_dir = SESSION_LINK_DIR / sandbox_name
+    if not link_dir.is_dir():
+        return False
+    prefix = f"{session_name}.attached."
+    return any(f.name.startswith(prefix) for f in link_dir.iterdir())
+
+
 def _clean_session_link(sandbox_name: str, session_name: str) -> None:
-    """Remove a single session-link file."""
+    """Remove a single session-link file and all its .attached.{pid} markers."""
     import shutil
 
     from ccbox.config import SESSION_LINK_DIR
 
     (SESSION_LINK_DIR / sandbox_name / session_name).unlink(missing_ok=True)
-    # Remove sandbox dir if now empty
+    # Remove all .attached.{pid} marker files for this session
     sandbox_dir = SESSION_LINK_DIR / sandbox_name
+    if sandbox_dir.is_dir():
+        prefix = f"{session_name}.attached."
+        for marker in sandbox_dir.iterdir():
+            if marker.name.startswith(prefix):
+                marker.unlink(missing_ok=True)
+    # Remove sandbox dir if now empty
     if sandbox_dir.is_dir() and not any(sandbox_dir.iterdir()):
         shutil.rmtree(sandbox_dir, ignore_errors=True)
 

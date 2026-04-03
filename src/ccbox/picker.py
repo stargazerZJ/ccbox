@@ -14,6 +14,7 @@ from textual.widgets.option_list import Option
 
 from ccbox import lxd
 from ccbox.config import SESSION_LINK_DIR, Config
+from ccbox.session import _is_session_attached
 from ccbox.transcript import read_session_info_any, relative_time
 
 console = Console()
@@ -323,6 +324,8 @@ def _collect_recent_sessions(config: Config) -> list[RecentSession]:
             continue
         # Trust session-link cache — no lxc exec needed
         for link_file in sandbox_dir.iterdir():
+            if ".attached" in link_file.name:
+                continue  # skip per-PID marker files
             tmux_name = link_file.name
             info = _session_info(sandbox_name, tmux_name)
             results.append(
@@ -331,7 +334,7 @@ def _collect_recent_sessions(config: Config) -> list[RecentSession]:
                     tmux_name=tmux_name,
                     container=entry.container,
                     info=info,
-                    attached=False,  # cache doesn't track attached state
+                    attached=_is_session_attached(sandbox_name, tmux_name),
                 )
             )
 
