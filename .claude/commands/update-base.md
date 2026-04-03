@@ -36,7 +36,22 @@ Repeat until the user says done.
 bash assets/update-base.sh publish
 ```
 
-Print: **"Base image `ccbox-base` updated. New sandboxes will use the updated image. Existing sandboxes are unchanged — recreate them to pick up changes (`ccbox remove <name>` then `ccbox`)."**
+### 5. Offer to update existing sandboxes
+
+After publishing, list existing sandboxes:
+```
+lxc list --format csv -c n | grep '^ccbox-' | sed 's/^ccbox-//'
+```
+
+Ask the user: **"Base image updated. Apply the same changes to existing sandboxes? If yes, which ones? (list: `<name1> <name2> ...` or `all`)"**
+
+If the user confirms, for each sandbox:
+1. Ensure it's running: `lxc start ccbox-<name>` (ignore error if already running)
+2. Replay the same commands that were applied to the temp container via `lxc exec ccbox-<name> -- ...`
+
+Run multiple sandboxes in parallel (background tasks) when possible.
+
+Print when done: **"All selected sandboxes updated."**
 
 ## Important
 - If the launch or publish script fails, fall back to running the equivalent `lxc` commands manually.
