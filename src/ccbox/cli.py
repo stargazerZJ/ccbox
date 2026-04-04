@@ -42,6 +42,7 @@ from ccbox.session import (
     clean_session_link,
     create_session,
     get_forwarded_env,
+    get_unset_env_vars,
     kill_all_sessions,
     kill_session,
     list_sessions,
@@ -193,6 +194,7 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
     """Default command: find/create sandbox for CWD, manage sessions."""
     cwd = os.getcwd()
     env = get_forwarded_env(config.state.env_whitelist)
+    unset_vars = get_unset_env_vars(config.state.env_whitelist)
 
     sandbox_name = config.sandbox_for_path(cwd)
 
@@ -206,7 +208,9 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
             attach_session(container, chosen, sandbox_name=sandbox_name)
         else:
             cmd = build_claude_command()
-            name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
+            name = create_session(
+                container, cmd, cwd=cwd, env=env, unset_vars=unset_vars, sandbox_name=sandbox_name
+            )
             attach_session(container, name, sandbox_name=sandbox_name)
     else:
         # CWD doesn't resolve — show unified picker
@@ -228,7 +232,9 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
             create_sandbox(config, sandbox_name, mounts=[(cwd, False)])
             container = ensure_running(config, sandbox_name)
             cmd = build_claude_command()
-            name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
+            name = create_session(
+                container, cmd, cwd=cwd, env=env, unset_vars=unset_vars, sandbox_name=sandbox_name
+            )
             attach_session(container, name, sandbox_name=sandbox_name)
         elif isinstance(result, MountToSandbox):
             from ccbox.mount import add_mount
@@ -236,7 +242,14 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
             add_mount(config, result.sandbox, cwd, readonly=result.readonly)
             container = ensure_running(config, result.sandbox)
             cmd = build_claude_command()
-            name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=result.sandbox)
+            name = create_session(
+                container,
+                cmd,
+                cwd=cwd,
+                env=env,
+                unset_vars=unset_vars,
+                sandbox_name=result.sandbox,
+            )
             attach_session(container, name, sandbox_name=result.sandbox)
 
 
@@ -247,12 +260,15 @@ def cmd_claude(config: Config, args: argparse.Namespace) -> None:
     sandbox_name = resolve_sandbox(config, args.sandbox)
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
+    unset_vars = get_unset_env_vars(config.state.env_whitelist)
 
     claude_args = args.claude_args
     if claude_args and claude_args[0] == "--":
         claude_args = claude_args[1:]
     cmd = build_claude_command(claude_args)
-    name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
+    name = create_session(
+        container, cmd, cwd=cwd, env=env, unset_vars=unset_vars, sandbox_name=sandbox_name
+    )
     attach_session(container, name, sandbox_name=sandbox_name)
 
 
@@ -263,12 +279,15 @@ def cmd_codex(config: Config, args: argparse.Namespace) -> None:
     sandbox_name = resolve_sandbox(config, args.sandbox)
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
+    unset_vars = get_unset_env_vars(config.state.env_whitelist)
 
     codex_args = args.codex_args
     if codex_args and codex_args[0] == "--":
         codex_args = codex_args[1:]
     cmd = build_codex_command(codex_args)
-    name = create_session(container, cmd, cwd=cwd, env=env, sandbox_name=sandbox_name)
+    name = create_session(
+        container, cmd, cwd=cwd, env=env, unset_vars=unset_vars, sandbox_name=sandbox_name
+    )
     attach_session(container, name, sandbox_name=sandbox_name)
 
 
@@ -494,6 +513,10 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
     env = get_forwarded_env(config.state.env_whitelist)
     env["CCBOX_CWD"] = cwd
     env["CCBOX_SANDBOX"] = sandbox_name
+    unset_vars = get_unset_env_vars(config.state.env_whitelist)
+    if unset_vars:
+        # ccbox-profile.sh reads this and unsets each listed var after login env reset.
+        env["CCBOX_UNSET_VARS"] = ",".join(unset_vars)
     # su -l gives a full login env (PAM, /etc/environment, profiles).
     # -w preserves listed vars through the login env reset; .bashrc cd's to CCBOX_CWD.
     preserve = ",".join(env.keys())

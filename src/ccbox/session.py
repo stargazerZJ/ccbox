@@ -103,6 +103,7 @@ def create_session(
     *,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
+    unset_vars: list[str] | None = None,
     session_name: str | None = None,
     sandbox_name: str | None = None,
 ) -> str:
@@ -143,6 +144,7 @@ def create_session(
         session_name=session_name,
         cwd=cwd,
         env=env,
+        unset_vars=unset_vars or [],
         command=command,
         session_link_dir=str(SESSION_LINK_DIR) if sandbox_name else None,
         sandbox_name=sandbox_name,
@@ -166,6 +168,7 @@ def _build_session_script(
     session_name: str | None,
     cwd: str | None,
     env: dict[str, str],
+    unset_vars: list[str],
     command: str,
     session_link_dir: str | None = None,
     sandbox_name: str | None = None,
@@ -215,6 +218,16 @@ def _build_session_script(
         else:
             lines.append(f'tmux set-environment -t "$name" {shlex.quote(k)} {shlex.quote(v)}')
     del env["CCBOX_TMUX_SESSION"]  # don't mutate caller's dict permanently
+
+    # Explicitly unset whitelisted vars not present on the host.
+    # We can't rely on `tmux set-environment -u` because the tmux server's own
+    # global environment (frozen at server-start time) still propagates to new
+    # shells regardless of session-level overrides. Instead we set CCBOX_UNSET_VARS
+    # so ccbox-profile.sh can do an explicit `unset` in the actual shell process.
+    if unset_vars:
+        lines.append(
+            f'tmux set-environment -t "$name" CCBOX_UNSET_VARS {shlex.quote(",".join(unset_vars))}'
+        )
 
     # Respawn pane so the shell picks up the tmux session environment
     respawn = 'tmux respawn-pane -k -t "$name"'
@@ -403,3 +416,8 @@ def get_forwarded_env(whitelist: list[str]) -> dict[str, str]:
         if val is not None:
             result[var] = val
     return result
+
+
+def get_unset_env_vars(whitelist: list[str]) -> list[str]:
+    """Return whitelisted vars that are NOT set on the host (should be unset in container)."""
+    return [var for var in whitelist if os.environ.get(var) is None]
