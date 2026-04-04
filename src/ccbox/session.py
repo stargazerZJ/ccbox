@@ -245,7 +245,9 @@ def attach_session(container: str, session_name: str, *, sandbox_name: str | Non
     Multiple concurrent attaches each hold their own marker.
     """
     if sandbox_name is not None:
-        _attached_marker(sandbox_name, session_name).touch()
+        marker = _attached_marker(sandbox_name, session_name)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
     try:
         lxd.exec_interactive(
             container,
