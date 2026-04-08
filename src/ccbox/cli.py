@@ -46,6 +46,7 @@ from ccbox.session import (
     kill_all_sessions,
     kill_session,
     list_sessions,
+    sandbox_env,
 )
 from ccbox.transcript import read_session_info_any, relative_time
 
@@ -514,17 +515,7 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
     username = _container_username(container)
     env = get_forwarded_env(config.state.env_whitelist)
     env["CCBOX_CWD"] = cwd
-    env["CCBOX_SANDBOX"] = sandbox_name
-    # Match the env vars that create_session sets for claude/codex sessions,
-    # so running claude/codex manually inside `ccbox shell` works correctly.
-    env.setdefault("IS_SANDBOX", "1")
-    from pathlib import Path
-
-    home = str(Path.home())
-    env.setdefault("CLAUDE_CONFIG_DIR", f"{home}/.claude")
-    from ccbox.config import UV_SOCK
-
-    env.setdefault("UV_HARDLINK_SOCKET", str(UV_SOCK))
+    sandbox_env(env, sandbox_name)
     unset_vars = get_unset_env_vars(config.state.env_whitelist)
     if unset_vars:
         # ccbox-profile.sh reads this and unsets each listed var after login env reset.

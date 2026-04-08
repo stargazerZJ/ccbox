@@ -97,6 +97,29 @@ def next_session_name(container: str) -> str:
     return f"s-{n}"
 
 
+def sandbox_env(env: dict[str, str], sandbox_name: str | None = None) -> dict[str, str]:
+    """Add standard ccbox internal env vars to *env* (in-place) and return it.
+
+    Called by both ``create_session`` (tmux path) and ``cmd_shell`` (su -l path)
+    so that any tool launched inside the container sees a consistent environment.
+    """
+    import getpass
+    from pathlib import Path
+
+    from ccbox.config import UV_SOCK
+
+    env.setdefault("IS_SANDBOX", "1")
+    if sandbox_name is not None:
+        env.setdefault("CCBOX_SANDBOX", sandbox_name)
+
+    env.setdefault("HOME", str(Path.home()))
+    env.setdefault("USER", getpass.getuser())
+    env.setdefault("LOGNAME", env["USER"])
+    env.setdefault("CLAUDE_CONFIG_DIR", f"{env['HOME']}/.claude")
+    env.setdefault("UV_HARDLINK_SOCKET", str(UV_SOCK))
+    return env
+
+
 def create_session(
     container: str,
     command: str,
@@ -115,29 +138,9 @@ def create_session(
     if env is None:
         env = {}
 
-    # Sandbox identity vars
-    env.setdefault("IS_SANDBOX", "1")
-    if sandbox_name is not None:
-        env.setdefault("CCBOX_SANDBOX", sandbox_name)
+    sandbox_env(env, sandbox_name)
 
-    # Ensure HOME is set — lxc exec with --env flags may not inherit it
-    from pathlib import Path
-
-    env.setdefault("HOME", str(Path.home()))
-
-    # Login identity vars — tools like git and claude expect these
-    import getpass
-
-    env.setdefault("USER", getpass.getuser())
-    env.setdefault("LOGNAME", env["USER"])
-
-    # Keep Claude's mutable config under ~/.claude (rw mount), not ~/.claude.json.
-    env.setdefault("CLAUDE_CONFIG_DIR", f"{env['HOME']}/.claude")
-
-    # Always set UV_HARDLINK_SOCKET so patched uv defers hardlinks to host
-    from ccbox.config import SESSION_LINK_DIR, UV_SOCK
-
-    env.setdefault("UV_HARDLINK_SOCKET", str(UV_SOCK))
+    from ccbox.config import SESSION_LINK_DIR
 
     # CCBOX_TMUX_SESSION is set inside the script (depends on resolved name)
     script = _build_session_script(
