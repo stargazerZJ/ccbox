@@ -12,6 +12,7 @@ from ccbox.mount import (
     add_auto_mounts,
     add_mount,
     ensure_profile_script,
+    ensure_tmux_conf,
     ensure_uv_shim,
     fix_mount_parents,
     prune_stale_mounts,
@@ -73,9 +74,10 @@ def create_sandbox(
         )
         raise SystemExit(1)
 
-    # Ensure uv shim, profile script, and server are ready before creating container
+    # Ensure uv shim, profile script, tmux conf, and server are ready before creating container
     ensure_uv_shim()
     ensure_profile_script()
+    ensure_tmux_conf()
     ensure_server_running()
 
     # Init container from base image (don't start yet — configure first)
@@ -125,6 +127,7 @@ def ensure_running(config: Config, name: str) -> str:
     if state == "Stopped":
         ensure_uv_shim()
         ensure_profile_script()
+        ensure_tmux_conf()
         ensure_server_running()
         lxd.start(entry.container)
         fix_mount_parents(entry.container, config)

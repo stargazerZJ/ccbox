@@ -8,7 +8,7 @@ import shlex
 from ccbox import lxd
 
 CONTAINER_USER = "1000"  # UID for the mapped user
-TMUX_CONF = "/etc/tmux.conf"
+TMUX_CONF = f"{os.path.expanduser('~')}/.config/ccbox/tmux.conf"
 
 
 def cached_session_names(sandbox_name: str) -> list[str]:

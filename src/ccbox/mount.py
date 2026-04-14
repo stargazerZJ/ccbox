@@ -191,6 +191,27 @@ def ensure_uv_shim() -> None:
     shim_path.chmod(shim_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def ensure_tmux_conf() -> None:
+    """Deploy assets/tmux.conf to ~/.config/ccbox/tmux.conf.
+
+    Copies on every sandbox start so edits to the asset propagate automatically.
+    """
+    from ccbox.config import STATE_DIR
+
+    dest = STATE_DIR / "tmux.conf"
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    asset_ref = importlib.resources.files("ccbox").parent.parent / "assets" / "tmux.conf"
+    content = asset_ref.read_text()
+
+    try:
+        if dest.exists() and dest.read_text() == content:
+            return
+    except (UnicodeDecodeError, OSError):
+        pass
+    dest.write_text(content)
+
+
 def ensure_profile_script() -> None:
     """Deploy assets/ccbox-profile.sh to ~/.config/ccbox/profile.sh.
 
