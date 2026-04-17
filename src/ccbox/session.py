@@ -140,6 +140,12 @@ def create_session(
 
     sandbox_env(env, sandbox_name)
 
+    # Pin CCBOX_CWD to the target cwd so profile.sh's `cd "$CCBOX_CWD"` lands
+    # here instead of inheriting a stale value baked into the tmux server env
+    # when it was first started from a different directory.
+    if cwd is not None:
+        env["CCBOX_CWD"] = cwd
+
     from ccbox.config import SESSION_LINK_DIR
 
     # CCBOX_TMUX_SESSION is set inside the script (depends on resolved name)

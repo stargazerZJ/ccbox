@@ -261,7 +261,6 @@ def cmd_claude(config: Config, args: argparse.Namespace) -> None:
     sandbox_name = resolve_sandbox(config, args.sandbox)
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
-    env["CCBOX_CWD"] = cwd
     unset_vars = get_unset_env_vars(config.state.env_whitelist)
 
     claude_args = args.claude_args
@@ -281,7 +280,6 @@ def cmd_codex(config: Config, args: argparse.Namespace) -> None:
     sandbox_name = resolve_sandbox(config, args.sandbox)
     container = ensure_running(config, sandbox_name)
     env = get_forwarded_env(config.state.env_whitelist)
-    env["CCBOX_CWD"] = cwd
     unset_vars = get_unset_env_vars(config.state.env_whitelist)
 
     codex_args = args.codex_args
