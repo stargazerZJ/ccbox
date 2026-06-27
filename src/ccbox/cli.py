@@ -506,7 +506,15 @@ def cmd_status(config: Config, args: argparse.Namespace) -> None:
 
 
 def cmd_shell(config: Config, args: argparse.Namespace) -> None:
-    """Drop into a bash shell in the sandbox (no tmux)."""
+    """Open a login shell in the sandbox, or run a command in it (no tmux).
+
+    With no command, drops into an interactive bash login shell. With a
+    command (ssh-style: ``ccbox shell ls -la``), runs it non-interactively in
+    the same login environment and working directory, then exits with the
+    command's exit code.
+    """
+    import shlex
+
     sandbox_name = resolve_sandbox(config, args.sandbox)
     container = ensure_running(config, sandbox_name)
     cwd = os.getcwd()
@@ -519,13 +527,36 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
         # ccbox-profile.sh reads this and unsets each listed var after login env reset.
         env["CCBOX_UNSET_VARS"] = ",".join(unset_vars)
     # su -l gives a full login env (PAM, /etc/environment, profiles).
-    # -w preserves listed vars through the login env reset; .bashrc cd's to CCBOX_CWD.
+    # -w preserves listed vars through the login env reset; profile.sh cd's to CCBOX_CWD.
     preserve = ",".join(env.keys())
-    lxd.exec_interactive(
+
+    command = getattr(args, "command", None) or []
+    if command and command[0] == "--":
+        command = command[1:]
+
+    if not command:
+        # Interactive login shell. .bashrc sources profile.sh (PATH/nvm/cd/unset).
+        lxd.exec_interactive(
+            container,
+            ["su", "-l", username, "-w", preserve],
+            env=env,
+        )
+        return
+
+    # Non-interactive command. A login shell's .bashrc early-returns for
+    # non-interactive invocations, so profile.sh would be skipped — source it
+    # explicitly so the command sees the same PATH/nvm/cwd as the interactive
+    # shell. Join argv ssh-style and let the login shell re-parse it (so
+    # pipes, redirects, and globs work).
+    profile = f"{env['HOME']}/.config/ccbox/profile.sh"
+    user_cmd = " ".join(command)
+    inner = f"[ -f {shlex.quote(profile)} ] && . {shlex.quote(profile)}\n{user_cmd}"
+    r = lxd.exec_interactive(
         container,
-        ["su", "-l", username, "-w", preserve],
+        ["su", "-l", username, "-w", preserve, "-c", inner],
         env=env,
     )
+    raise SystemExit(r.returncode)
 
 
 def cmd_port(config: Config, args: argparse.Namespace) -> None:
@@ -873,14 +904,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sandbox name (default: auto from CWD)",
     )
 
-    # ccbox shell [-s SANDBOX]
-    p_shell = sub.add_parser("shell", help="Bash shell in sandbox")
+    # ccbox shell [-s SANDBOX] [command...]
+    p_shell = sub.add_parser("shell", help="Login shell in sandbox, or run a command in it")
     p_shell.add_argument(
         "-s",
         "--sandbox",
         default=None,
         metavar="SANDBOX",
         help="Sandbox name (default: auto from CWD)",
+    )
+    p_shell.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Command to run (ssh-style; omit for interactive shell). "
+        "Use -- to separate flags meant for the command.",
     )
 
     # ccbox port {forward,expose,ls,rm}

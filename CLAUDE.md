@@ -57,6 +57,7 @@ The project uses Python 3.12+ with `rich` and `textual` as dependencies. No test
 
 - Container names are prefixed `ccbox-` (e.g., sandbox "mybox" → container "ccbox-mybox")
 - Sessions are named `sandbox/N` (e.g., `mybox/0`); the `attach` and `kill` commands accept this format
+- `ccbox shell` opens an interactive login shell; `ccbox shell <cmd...>` runs a command ssh-style (same login env + CWD, exits with the command's code). The command path sources `profile.sh` explicitly since `.bashrc` early-returns for non-interactive shells
 - Stopped sandboxes auto-start on any command that calls `ensure_running()`
 - `lxc publish --reuse` (not `--force`) to replace existing image aliases
 - Shell profile is externalized: `assets/ccbox-profile.sh` is mounted read-only and sourced by `.bashrc` in the container — edits take effect on next shell without image rebuild
