@@ -25,7 +25,15 @@ uvx ruff check --fix src/    # autofix
 
 Ruff config is in `pyproject.toml` (line-length 100, Python 3.12 target). Run both check and format before committing.
 
-The project uses Python 3.12+ with `rich` and `textual` as dependencies. No test suite is configured.
+The project uses Python 3.12+ with `rich` and `textual` as dependencies.
+
+## Testing
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests   # run the test suite
+```
+
+Tests live in `tests/` (stdlib `unittest`, no extra deps). `tests/test_transcript.py` covers `transcript.py`'s Claude session-info extraction (history.jsonl cross-referencing, prompt-wrapper unwrapping, metadata fallback).
 
 ## Architecture
 

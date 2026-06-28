@@ -4,50 +4,91 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import UTC, datetime
+from typing import Any
+
+_SKIP_FIRST_PROMPT_RE = re.compile(
+    r"^(?:\s*<[a-z][\w-]*[\s>]|\[Request interrupted by user[^\]]*\])"
+)
+
+_CLAUDE_HISTORY_CACHE: dict[str, dict[str, str]] = {}
+_CLAUDE_HISTORY_CACHE_SIG: tuple[str, int, int] | None = None
 
 
 def read_session_info(transcript_path: str) -> dict | None:
-    """Extract last-prompt info from a Claude Code JSONL transcript.
+    """Extract session info from a Claude Code transcript and history.
 
     Returns dict with keys: last_prompt, timestamp, git_branch, message_count.
-    Returns None if the file doesn't exist or has no user messages.
+    Returns None if the file doesn't exist or has no usable metadata.
     """
     if not os.path.isfile(transcript_path):
         return None
 
-    last_user_line = _find_last_user_line(transcript_path)
-    if last_user_line is None:
-        return None
+    session_id = ""
+    git_branch = ""
+    last_prompt = ""
+    last_prompt_timestamp = ""
+    last_prompt_metadata = ""
+    message_count = 0
 
     try:
-        entry = json.loads(last_user_line)
-    except (json.JSONDecodeError, ValueError):
+        with open(transcript_path, encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                if not session_id:
+                    session_id = _extract_session_id(entry)
+
+                entry_git_branch = entry.get("gitBranch")
+                if isinstance(entry_git_branch, str) and entry_git_branch:
+                    git_branch = entry_git_branch
+
+                if entry.get("type") == "last-prompt":
+                    maybe_last_prompt = _normalize_prompt(entry.get("lastPrompt"))
+                    if maybe_last_prompt:
+                        last_prompt_metadata = maybe_last_prompt
+                    continue
+
+                prompt = _extract_claude_prompt(entry)
+                if not prompt:
+                    continue
+
+                message_count += 1
+                last_prompt = prompt
+                timestamp = entry.get("timestamp")
+                if isinstance(timestamp, str):
+                    last_prompt_timestamp = timestamp
+    except OSError:
         return None
 
-    # Extract prompt text from message.content
-    msg = entry.get("message", {})
-    content = msg.get("content", "")
-    if isinstance(content, list):
-        # Tool results and multi-part messages — take first text block
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text":
-                content = part["text"]
-                break
-            elif isinstance(part, str):
-                content = part
-                break
-        else:
-            content = str(content[0]) if content else ""
-    prompt = content[:80].replace("\n", " ").strip()
+    history_entry = _get_claude_history_entry(session_id)
+    history_timestamp = history_entry.get("timestamp", "")
+    history_dt = _parse_datetime(history_timestamp)
+    transcript_dt = _parse_datetime(last_prompt_timestamp)
 
-    # Count user messages (forward scan, byte check only)
-    message_count = _count_user_messages(transcript_path)
+    if history_entry.get("last_prompt") and (
+        transcript_dt is None or history_dt is None or history_dt >= transcript_dt
+    ):
+        prompt = history_entry["last_prompt"]
+        timestamp = history_timestamp
+    else:
+        prompt = last_prompt_metadata or last_prompt
+        timestamp = last_prompt_timestamp
+
+    if not prompt and not git_branch and message_count == 0:
+        return None
 
     return {
         "last_prompt": prompt,
-        "timestamp": entry.get("timestamp", ""),
-        "git_branch": entry.get("gitBranch", ""),
+        "timestamp": timestamp,
+        "git_branch": git_branch,
         "message_count": message_count,
     }
 
@@ -126,49 +167,153 @@ def read_session_info_any(transcript_path: str) -> dict | None:
     return read_session_info(transcript_path)
 
 
-def _count_user_messages(path: str) -> int:
-    """Count real user prompt lines in a Claude Code transcript."""
-    count = 0
+def _extract_session_id(entry: dict[str, Any]) -> str:
+    """Extract a Claude session ID from a transcript entry."""
+    session_id = entry.get("sessionId")
+    if isinstance(session_id, str):
+        return session_id
+    return ""
+
+
+def _extract_claude_prompt(entry: dict[str, Any]) -> str:
+    """Extract a meaningful Claude user prompt from one transcript entry."""
+    if entry.get("type") != "user" or entry.get("isMeta") or entry.get("isCompactSummary"):
+        return ""
+
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return ""
+
+    content = message.get("content")
+    texts: list[str] = []
+    if isinstance(content, str):
+        texts.append(content)
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+
+    command_fallback = ""
+    for text in texts:
+        if not text:
+            continue
+
+        command_name = _extract_tag(text, "command-name")
+        if command_name:
+            command_args = _normalize_prompt(_extract_tag(text, "command-args"))
+            if command_args:
+                return _normalize_prompt(f"{command_name} {command_args}")
+            if not command_fallback:
+                command_fallback = command_name
+            continue
+
+        bash_input = _extract_tag(text, "bash-input")
+        if bash_input:
+            return _normalize_prompt(f"! {bash_input}")
+
+        if _SKIP_FIRST_PROMPT_RE.match(text):
+            continue
+
+        return _normalize_prompt(text)
+
+    return command_fallback
+
+
+def _get_claude_history_entry(session_id: str) -> dict[str, str]:
+    """Return the last prompt-history entry for a Claude session."""
+    if not session_id:
+        return {}
+    return _load_claude_history_index().get(session_id, {})
+
+
+def _load_claude_history_index() -> dict[str, dict[str, str]]:
+    """Index Claude's history.jsonl by session ID, newest entry wins."""
+    global _CLAUDE_HISTORY_CACHE, _CLAUDE_HISTORY_CACHE_SIG
+
+    history_path = os.path.expanduser("~/.claude/history.jsonl")
     try:
-        with open(path, "rb") as f:
-            for line in f:
-                if _is_user_prompt_line(line):
-                    count += 1
+        stat = os.stat(history_path)
     except OSError:
-        pass
-    return count
+        _CLAUDE_HISTORY_CACHE = {}
+        _CLAUDE_HISTORY_CACHE_SIG = None
+        return {}
 
+    cache_sig = (history_path, stat.st_mtime_ns, stat.st_size)
+    if cache_sig == _CLAUDE_HISTORY_CACHE_SIG:
+        return _CLAUDE_HISTORY_CACHE
 
-def _find_last_user_line(path: str) -> bytes | None:
-    """Reverse-seek through a JSONL file to find the last real user prompt.
-
-    Skips tool_result messages (content is a list of tool_result dicts)
-    and looks for messages where content is a plain string.
-    """
-    chunk_size = 8192
+    index: dict[str, dict[str, str]] = {}
     try:
-        with open(path, "rb") as f:
-            f.seek(0, 2)
-            pos = f.tell()
-            buf = b""
-            while pos > 0:
-                read_size = min(chunk_size, pos)
-                pos -= read_size
-                f.seek(pos)
-                buf = f.read(read_size) + buf
-                lines = buf.split(b"\n")
-                # Check lines from end (skip last empty element from trailing newline)
-                for line in reversed(lines[1:]):
-                    if _is_user_prompt_line(line):
-                        return line
-                # Keep the first (possibly partial) line for next iteration
-                buf = lines[0]
-            # Check remaining buffer
-            if buf and _is_user_prompt_line(buf):
-                return buf
+        with open(history_path, encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                session_id = entry.get("sessionId")
+                display = entry.get("display")
+                timestamp = entry.get("timestamp")
+                if not isinstance(session_id, str) or not isinstance(display, str):
+                    continue
+
+                index[session_id] = {
+                    "last_prompt": _normalize_prompt(display),
+                    "timestamp": _history_timestamp_to_iso(timestamp),
+                }
     except OSError:
-        pass
-    return None
+        return {}
+
+    _CLAUDE_HISTORY_CACHE = index
+    _CLAUDE_HISTORY_CACHE_SIG = cache_sig
+    return index
+
+
+def _history_timestamp_to_iso(timestamp: Any) -> str:
+    """Convert Claude prompt-history timestamps (ms epoch) to ISO8601 UTC."""
+    if not isinstance(timestamp, int | float):
+        return ""
+    dt = datetime.fromtimestamp(timestamp / 1000, UTC)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _normalize_prompt(value: Any, *, limit: int = 200) -> str:
+    """Collapse whitespace and truncate prompts for compact display."""
+    if not isinstance(value, str):
+        return ""
+    prompt = re.sub(r"\s+", " ", value).strip()
+    if len(prompt) > limit:
+        return prompt[:limit].rstrip() + "..."
+    return prompt
+
+
+def _extract_tag(text: str, tag_name: str) -> str | None:
+    """Extract XML-ish tags used by Claude Code prompt wrappers."""
+    if not text or not tag_name:
+        return None
+    pattern = re.compile(
+        rf"<{re.escape(tag_name)}(?:\s+[^>]*)?>(.*?)</{re.escape(tag_name)}>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(text)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    """Parse ISO8601 timestamps and ignore malformed inputs."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_user_prompt_line(line: bytes) -> bool:
