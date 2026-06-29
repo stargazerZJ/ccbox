@@ -631,7 +631,7 @@ def cmd_config(config: Config, args: argparse.Namespace) -> None:
             config.set_storage_pool(args.pool_name)
             print(f"Storage pool set to '{args.pool_name}'.")
         else:
-            pool = config.state.storage_pool
+            pool = config.state.host_config().storage_pool
             if pool:
                 print(f"Storage pool: {pool}")
             else:

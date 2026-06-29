@@ -47,6 +47,45 @@ def container_name(sandbox_name: str) -> str:
     return f"{CONTAINER_PREFIX}{sandbox_name}"
 
 
+GPU_DEVICE = "nv-gpu"
+
+
+def apply_container_config(config: Config, entry: SandboxEntry) -> list[str]:
+    """Apply (and idempotently repair) captured container-level config: GPU
+    passthrough, security.nesting, nvidia.runtime, and declared proxy devices.
+
+    Safe to call on a running or stopped container — config keys are set
+    unconditionally (idempotent) and devices are only added when absent. Used on
+    create and on start (self-heals after a ZFS/lxc-copy replication).
+
+    Returns human-readable change descriptions.
+    """
+    cname = entry.container
+    changes: list[str] = []
+
+    if entry.nesting:
+        lxd.set_config(cname, "security.nesting", "true")
+    if entry.nvidia_runtime:
+        lxd.set_config(cname, "nvidia.runtime", "true")
+
+    devices = lxd.list_devices(cname) if (entry.gpu_pci or entry.proxies) else {}
+
+    if entry.gpu_pci and GPU_DEVICE not in devices:
+        lxd.add_gpu_device(cname, GPU_DEVICE, entry.gpu_pci)
+        changes.append(f"  + gpu {GPU_DEVICE} (pci={entry.gpu_pci})")
+
+    if entry.proxies:
+        wg_ip = config.state.host_config().wg_ip
+        for p in entry.proxies:
+            if p.device_name() in devices:
+                continue
+            listen, connect = p.resolve(wg_ip)
+            lxd.add_proxy_device(cname, p.device_name(), listen, connect, bind=p.bind)
+            changes.append(f"  + proxy {p.device_name()} ({listen} → {connect})")
+
+    return changes
+
+
 def create_sandbox(
     config: Config,
     name: str,
@@ -81,7 +120,7 @@ def create_sandbox(
     ensure_server_running()
 
     # Init container from base image (don't start yet — configure first)
-    lxd.init_container(BASE_IMAGE, cname, storage=config.state.storage_pool)
+    lxd.init_container(BASE_IMAGE, cname, storage=config.state.host_config().storage_pool)
 
     # Set UID mapping
     lxd.set_config(cname, "raw.idmap", IDMAP_VALUE)
@@ -92,6 +131,9 @@ def create_sandbox(
     # Register in config before user mounts (so add_mount can find it)
     entry = SandboxEntry(container=cname)
     config.set_sandbox(name, entry)
+
+    # Apply captured container-level config (GPU/nesting/nvidia.runtime/proxies)
+    apply_container_config(config, entry)
 
     # Add user-requested mounts
     if mounts:
@@ -129,6 +171,9 @@ def ensure_running(config: Config, name: str) -> str:
         ensure_profile_script()
         ensure_tmux_conf()
         ensure_server_running()
+        # Self-heal captured config (GPU/nesting/proxies) before start — repairs
+        # a container received via ZFS/lxc-copy replication on another host.
+        apply_container_config(config, entry)
         lxd.start(entry.container)
         fix_mount_parents(entry.container, config)
     return entry.container

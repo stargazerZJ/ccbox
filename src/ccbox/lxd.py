@@ -224,6 +224,11 @@ def add_proxy_device(
     )
 
 
+def add_gpu_device(container: str, dev_name: str, pci: str) -> None:
+    """Add a physical GPU passthrough device by PCI address (e.g. '01:00.0')."""
+    run_lxc("config", "device", "add", container, dev_name, "gpu", f"pci={pci}")
+
+
 def remove_device(container: str, dev_name: str) -> None:
     run_lxc("config", "device", "remove", container, dev_name)
 

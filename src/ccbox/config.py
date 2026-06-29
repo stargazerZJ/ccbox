@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,21 +42,82 @@ class MountEntry:
 
 
 @dataclass
+class ProxyEntry:
+    """An LXD proxy device captured declaratively.
+
+    `listen`/`connect` are LXD proxy address specs (e.g. "tcp:127.0.0.1:5173").
+    A literal "{wg_ip}" token in either field is substituted with the active
+    host's `wg_ip` (per-host config) when the device is applied, so one spec is
+    portable across machines with different WireGuard addresses.
+    """
+
+    name: str  # device-name suffix → "port-<name>"
+    listen: str
+    connect: str
+    bind: str = "host"  # "host" (listen on host) or "instance" (listen in container)
+
+    def device_name(self) -> str:
+        return f"port-{self.name}"
+
+    def resolve(self, wg_ip: str | None) -> tuple[str, str]:
+        """Return (listen, connect) with {wg_ip} substituted."""
+        listen = self.listen
+        connect = self.connect
+        if wg_ip is not None:
+            listen = listen.replace("{wg_ip}", wg_ip)
+            connect = connect.replace("{wg_ip}", wg_ip)
+        return listen, connect
+
+    def to_dict(self) -> dict:
+        d: dict = {"name": self.name, "listen": self.listen, "connect": self.connect}
+        if self.bind != "host":
+            d["bind"] = self.bind
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> ProxyEntry:
+        return cls(
+            name=d["name"],
+            listen=d["listen"],
+            connect=d["connect"],
+            bind=d.get("bind", "host"),
+        )
+
+
+@dataclass
 class SandboxEntry:
     container: str
     mounts: list[MountEntry] = field(default_factory=list)
+    # Captured container-level config (applied on create, repaired on start).
+    nesting: bool = False  # security.nesting
+    nvidia_runtime: bool = False  # nvidia.runtime
+    gpu_pci: str | None = None  # physical GPU passthrough, e.g. "01:00.0"
+    proxies: list[ProxyEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "container": self.container,
             "mounts": [m.to_dict() for m in self.mounts],
         }
+        if self.nesting:
+            d["nesting"] = True
+        if self.nvidia_runtime:
+            d["nvidia_runtime"] = True
+        if self.gpu_pci is not None:
+            d["gpu_pci"] = self.gpu_pci
+        if self.proxies:
+            d["proxies"] = [p.to_dict() for p in self.proxies]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> SandboxEntry:
         return cls(
             container=d["container"],
             mounts=[MountEntry.from_dict(m) for m in d.get("mounts", [])],
+            nesting=d.get("nesting", False),
+            nvidia_runtime=d.get("nvidia_runtime", False),
+            gpu_pci=d.get("gpu_pci"),
+            proxies=[ProxyEntry.from_dict(p) for p in d.get("proxies", [])],
         )
 
 
@@ -92,16 +154,60 @@ def _default_auto_mounts() -> list[MountEntry]:
 
 
 @dataclass
+class HostConfig:
+    """Per-host bits that must resolve per machine, so one synced state.json is
+    portable. Keyed by socket.gethostname() in State.hosts."""
+
+    storage_pool: str | None = None
+    network: str | None = None  # LXD bridge/network name (e.g. "lxdbr0")
+    wg_ip: str | None = None  # WireGuard IP used by {wg_ip} proxy specs
+
+    def to_dict(self) -> dict:
+        d: dict = {}
+        if self.storage_pool is not None:
+            d["storage_pool"] = self.storage_pool
+        if self.network is not None:
+            d["network"] = self.network
+        if self.wg_ip is not None:
+            d["wg_ip"] = self.wg_ip
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> HostConfig:
+        return cls(
+            storage_pool=d.get("storage_pool"),
+            network=d.get("network"),
+            wg_ip=d.get("wg_ip"),
+        )
+
+
+@dataclass
 class State:
     sandboxes: dict[str, SandboxEntry] = field(default_factory=dict)
     env_whitelist: list[str] = field(default_factory=list)
-    storage_pool: str | None = None
+    storage_pool: str | None = None  # legacy global fallback (superseded by hosts)
     auto_mounts: list[MountEntry] | None = None  # None = use defaults
+    hosts: dict[str, HostConfig] = field(default_factory=dict)
 
     def get_auto_mounts(self) -> list[MountEntry]:
         if self.auto_mounts is None:
             return _default_auto_mounts()
         return self.auto_mounts
+
+    def host_config(self, hostname: str | None = None) -> HostConfig:
+        """Resolve the active host's config, falling back to the legacy
+        top-level storage_pool when the host isn't listed."""
+        if hostname is None:
+            hostname = socket.gethostname()
+        hc = self.hosts.get(hostname)
+        if hc is None:
+            return HostConfig(storage_pool=self.storage_pool)
+        # Fill an unset storage_pool from the legacy global value.
+        if hc.storage_pool is None and self.storage_pool is not None:
+            return HostConfig(
+                storage_pool=self.storage_pool, network=hc.network, wg_ip=hc.wg_ip
+            )
+        return hc
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -112,6 +218,8 @@ class State:
             d["storage_pool"] = self.storage_pool
         if self.auto_mounts is not None:
             d["auto_mounts"] = [m.to_dict() for m in self.auto_mounts]
+        if self.hosts:
+            d["hosts"] = {k: v.to_dict() for k, v in self.hosts.items()}
         return d
 
     @classmethod
@@ -124,6 +232,7 @@ class State:
             env_whitelist=d.get("env_whitelist", []),
             storage_pool=d.get("storage_pool"),
             auto_mounts=auto_mounts,
+            hosts={k: HostConfig.from_dict(v) for k, v in d.get("hosts", {}).items()},
         )
 
 
