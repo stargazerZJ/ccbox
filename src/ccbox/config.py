@@ -141,6 +141,10 @@ def _default_auto_mounts() -> list[MountEntry]:
         MountEntry(path=f"{home}/.cache/uv", mode="rw"),
         MountEntry(path=f"{home}/.local/share/uv", mode="rw"),
         MountEntry(path=f"{home}/.config/uv", mode="ro"),
+        # HuggingFace cache shared with the host (content-addressed; like uv).
+        # Keeps multi-GB model/dataset blobs out of every container rootfs so
+        # ZFS-replicated rootfs stay lean. Optional: host may not have it yet.
+        MountEntry(path=f"{home}/.cache/huggingface", mode="rw", optional=True),
         # uv shim → ~/.local/bin/uv inside the container
         MountEntry(path=str(SHIM_DIR / "uv"), mode="ro", target=f"{home}/.local/bin/uv"),
         # Socket directory for host↔container uv channel + session links
