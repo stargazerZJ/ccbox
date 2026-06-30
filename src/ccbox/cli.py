@@ -7,7 +7,7 @@ import os
 import sys
 
 from ccbox import lxd
-from ccbox.config import SESSION_LINK_DIR, Config
+from ccbox.config import SESSION_LINK_DIR, Config, ProxyEntry
 from ccbox.mount import add_mount, remove_mount, sync_auto_mounts
 from ccbox.picker import (
     AttachSession,
@@ -530,11 +530,11 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
     # -w preserves listed vars through the login env reset; profile.sh cd's to CCBOX_CWD.
     preserve = ",".join(env.keys())
 
-    command = getattr(args, "command", None) or []
-    if command and command[0] == "--":
-        command = command[1:]
+    shell_command = getattr(args, "shell_command", None) or []
+    if shell_command and shell_command[0] == "--":
+        shell_command = shell_command[1:]
 
-    if not command:
+    if not shell_command:
         # Interactive login shell. .bashrc sources profile.sh (PATH/nvm/cd/unset).
         lxd.exec_interactive(
             container,
@@ -549,7 +549,7 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
     # shell. Join argv ssh-style and let the login shell re-parse it (so
     # pipes, redirects, and globs work).
     profile = f"{env['HOME']}/.config/ccbox/profile.sh"
-    user_cmd = " ".join(command)
+    user_cmd = " ".join(shell_command)
     inner = f"[ -f {shlex.quote(profile)} ] && . {shlex.quote(profile)}\n{user_cmd}"
     r = lxd.exec_interactive(
         container,
@@ -557,6 +557,32 @@ def cmd_shell(config: Config, args: argparse.Namespace) -> None:
         env=env,
     )
     raise SystemExit(r.returncode)
+
+
+def _portable_host_addr(config: Config, addr: str) -> str:
+    wg_ip = config.state.host_config().wg_ip
+    return "{wg_ip}" if wg_ip is not None and addr == wg_ip else addr
+
+
+def _remember_proxy(config: Config, sandbox_name: str, proxy: ProxyEntry) -> None:
+    entry = config.get_sandbox(sandbox_name)
+    if entry is None:
+        raise ValueError(f"Sandbox '{sandbox_name}' not found")
+    entry.proxies = [p for p in entry.proxies if p.name != proxy.name]
+    entry.proxies.append(proxy)
+    config.set_sandbox(sandbox_name, entry)
+
+
+def _forget_proxy(config: Config, sandbox_name: str, device_name: str) -> None:
+    entry = config.get_sandbox(sandbox_name)
+    if entry is None:
+        raise ValueError(f"Sandbox '{sandbox_name}' not found")
+    before = len(entry.proxies)
+    entry.proxies = [
+        p for p in entry.proxies if p.device_name() != device_name and p.name != device_name
+    ]
+    if len(entry.proxies) != before:
+        config.set_sandbox(sandbox_name, entry)
 
 
 def cmd_port(config: Config, args: argparse.Namespace) -> None:
@@ -574,6 +600,17 @@ def cmd_port(config: Config, args: argparse.Namespace) -> None:
             udp=args.udp,
         )
         proto = "udp" if args.udp else "tcp"
+        portable_host = _portable_host_addr(config, host_addr)
+        _remember_proxy(
+            config,
+            sandbox_name,
+            ProxyEntry(
+                name=name.removeprefix("port-"),
+                listen=f"{proto}:127.0.0.1:{args.container_port}",
+                connect=f"{proto}:{portable_host}:{host_port}",
+                bind="instance",
+            ),
+        )
         msg = f"Forward ({proto}): container:{args.container_port} → {host_addr}:{host_port}"
         print(f"{msg}  [{name}]")
 
@@ -592,6 +629,17 @@ def cmd_port(config: Config, args: argparse.Namespace) -> None:
         )
         proto = "udp" if args.udp else "tcp"
         effective_port = bind_port if bind_port is not None else args.container_port
+        portable_bind = _portable_host_addr(config, bind_addr)
+        _remember_proxy(
+            config,
+            sandbox_name,
+            ProxyEntry(
+                name=name.removeprefix("port-"),
+                listen=f"{proto}:{portable_bind}:{effective_port}",
+                connect=f"{proto}:127.0.0.1:{args.container_port}",
+                bind="host",
+            ),
+        )
         msg = f"Expose ({proto}): {bind_addr}:{effective_port} → container:{args.container_port}"
         print(f"{msg}  [{name}]")
 
@@ -607,6 +655,7 @@ def cmd_port(config: Config, args: argparse.Namespace) -> None:
 
     elif args.port_action == "rm":
         remove_port(container, args.name)
+        _forget_proxy(config, sandbox_name, args.name)
         print(f"Removed '{args.name}'.")
 
 
@@ -914,7 +963,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sandbox name (default: auto from CWD)",
     )
     p_shell.add_argument(
-        "command",
+        "shell_command",
         nargs=argparse.REMAINDER,
         help="Command to run (ssh-style; omit for interactive shell). "
         "Use -- to separate flags meant for the command.",

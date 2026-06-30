@@ -346,8 +346,12 @@ class Config:
             self._state.env_whitelist.remove(var)
             self.save()
 
-    def set_storage_pool(self, pool: str | None) -> None:
-        self._state.storage_pool = pool
+    def set_storage_pool(self, pool: str | None, hostname: str | None = None) -> None:
+        if hostname is None:
+            hostname = socket.gethostname()
+        hc = self._state.host_config(hostname)
+        hc.storage_pool = pool
+        self._state.hosts[hostname] = hc
         self.save()
 
     def _ensure_auto_mounts_materialized(self) -> None:

@@ -50,6 +50,21 @@ def container_name(sandbox_name: str) -> str:
 GPU_DEVICE = "nv-gpu"
 
 
+def _requires_host_value(*specs: str) -> bool:
+    return any("{wg_ip}" in spec for spec in specs)
+
+
+def _proxy_matches(device: dict[str, str] | None, listen: str, connect: str, bind: str) -> bool:
+    if device is None:
+        return False
+    return (
+        device.get("type") == "proxy"
+        and device.get("listen") == listen
+        and device.get("connect") == connect
+        and device.get("bind", "host") == bind
+    )
+
+
 def apply_container_config(config: Config, entry: SandboxEntry) -> list[str]:
     """Apply (and idempotently repair) captured container-level config: GPU
     passthrough, security.nesting, nvidia.runtime, and declared proxy devices.
@@ -70,18 +85,32 @@ def apply_container_config(config: Config, entry: SandboxEntry) -> list[str]:
 
     devices = lxd.list_devices(cname) if (entry.gpu_pci or entry.proxies) else {}
 
-    if entry.gpu_pci and GPU_DEVICE not in devices:
-        lxd.add_gpu_device(cname, GPU_DEVICE, entry.gpu_pci)
-        changes.append(f"  + gpu {GPU_DEVICE} (pci={entry.gpu_pci})")
+    if entry.gpu_pci:
+        gpu = devices.get(GPU_DEVICE)
+        if gpu is not None and (gpu.get("type") != "gpu" or gpu.get("pci") != entry.gpu_pci):
+            lxd.remove_device(cname, GPU_DEVICE)
+            gpu = None
+            changes.append(f"  ~ gpu {GPU_DEVICE} (pci={entry.gpu_pci})")
+        if gpu is None:
+            lxd.add_gpu_device(cname, GPU_DEVICE, entry.gpu_pci)
+            changes.append(f"  + gpu {GPU_DEVICE} (pci={entry.gpu_pci})")
 
     if entry.proxies:
         wg_ip = config.state.host_config().wg_ip
         for p in entry.proxies:
-            if p.device_name() in devices:
-                continue
+            if wg_ip is None and _requires_host_value(p.listen, p.connect):
+                raise ValueError(
+                    f"Proxy '{p.name}' requires hosts.<hostname>.wg_ip before it can be applied"
+                )
             listen, connect = p.resolve(wg_ip)
-            lxd.add_proxy_device(cname, p.device_name(), listen, connect, bind=p.bind)
-            changes.append(f"  + proxy {p.device_name()} ({listen} → {connect})")
+            dev_name = p.device_name()
+            if _proxy_matches(devices.get(dev_name), listen, connect, p.bind):
+                continue
+            if dev_name in devices:
+                lxd.remove_device(cname, dev_name)
+                changes.append(f"  ~ proxy {dev_name} ({listen} -> {connect})")
+            lxd.add_proxy_device(cname, dev_name, listen, connect, bind=p.bind)
+            changes.append(f"  + proxy {dev_name} ({listen} -> {connect})")
 
     return changes
 
