@@ -60,11 +60,23 @@ def _container_ino(container: str, path: str) -> int | None:
 
 
 def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
-    """Remove mounts whose host paths no longer exist or whose inode changed.
+    """Remove mounts whose host path vanished, or whose live bind mount now
+    points at a different inode than the host (dir was moved/deleted+recreated —
+    LXD still follows the old, orphaned inode).
 
-    A changed inode means the original directory was moved/deleted and a new
-    one appeared at the same path — the LXD bind mount still follows the old
-    inode, so the device must be removed.
+    Staleness is decided by comparing the *running container's* inode against
+    the host's current inode, NOT the stored ``dev:ino``. Stored ``dev:ino`` is
+    host-local — device numbers differ across machines and across reboots (ZFS
+    pools reimport with new dev numbers) — so a replicated/migrated state.json
+    carries the origin host's values. Trusting them would flag every mount as
+    "replaced" on the peer and wipe all bind mounts on each invocation. When the
+    container isn't running there is nothing orphaned to detect, so only the
+    path-missing case prunes; a stopped container re-applies its devices at
+    start pointing at the local paths.
+
+    Kept entries have their stored inode re-stamped to the local value so
+    ``--list`` output and future same-host checks stay accurate after a
+    migration.
 
     Returns list of pruned paths (for caller to report).
     """
@@ -72,14 +84,24 @@ def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
     if entry is None:
         return []
 
+    running = lxd.container_state(entry.container) == "Running"
+
     pruned: list[str] = []
     keep: list[MountEntry] = []
+    dirty = False
     for m in entry.mounts:
         reason = None
-        if not os.path.exists(m.path):
+        cur = _inode_key(m.path)
+        if cur is None:
             reason = "no longer exists on host"
-        elif _inode_key(m.path) != m.inode:
-            reason = "replaced by a different directory"
+        elif running:
+            # Portable staleness check: does the container still see the same
+            # inode the host currently exposes? A mismatch means the host dir
+            # was replaced while the old inode stayed bind-mounted.
+            target = m.target or m.path
+            container_ino = _container_ino(entry.container, target)
+            if container_ino is not None and os.stat(m.path).st_ino != container_ino:
+                reason = "replaced by a different directory"
 
         if reason:
             dev_name = device_name_from_path(m.path)
@@ -89,6 +111,7 @@ def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
                 pass  # device may already be gone
             mode_flag = " --ro" if m.mode == "ro" else ""
             pruned.append(m.path)
+            dirty = True
             print(f"Removing stale mount: {m.path} ({reason})", file=sys.stderr)
             if os.path.exists(m.path):
                 print(
@@ -96,9 +119,14 @@ def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
                     file=sys.stderr,
                 )
         else:
+            # Adopt the local inode: stops stale foreign values from lingering
+            # and keeps same-host bookkeeping honest.
+            if cur is not None and cur != m.inode:
+                m.inode = cur
+                dirty = True
             keep.append(m)
 
-    if pruned:
+    if dirty:
         entry.mounts = keep
         config.set_sandbox(sandbox_name, entry)
 
