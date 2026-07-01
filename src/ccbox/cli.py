@@ -46,9 +46,15 @@ from ccbox.session import (
     kill_all_sessions,
     kill_session,
     list_sessions,
+    read_session_link,
     sandbox_env,
+    session_exists,
 )
-from ccbox.transcript import read_session_info_any, relative_time
+from ccbox.transcript import (
+    read_session_info_any,
+    relative_time,
+    session_id_from_transcript,
+)
 
 
 def check_lxd_group() -> None:
@@ -153,6 +159,12 @@ def cmd_session_cleanup(config: Config, args: argparse.Namespace) -> None:
     tmux_session = os.environ.get("CCBOX_TMUX_SESSION", "")
     if not sandbox or not tmux_session:
         return  # no-op outside ccbox containers
+    # This runs (as `command; ccbox _session-cleanup; exit`) while the pane is
+    # still up, so an attached host is still holding its .attached marker. Leave
+    # the link for that host to read (it prints a resume hint, then cleans up).
+    # Only self-clean when no host is watching (e.g. a detached session exiting).
+    if _is_session_attached(sandbox, tmux_session):
+        return
     clean_session_link(sandbox, tmux_session)
 
 
@@ -191,6 +203,50 @@ def cmd_resolve(config: Config, args: argparse.Namespace) -> None:
             print(f"  {m.path} ({m.mode})")
 
 
+def _launch_claude(
+    container: str,
+    cwd: str,
+    env: dict,
+    unset_vars: list[str],
+    sandbox_name: str,
+    claude_args: list[str] | None = None,
+) -> None:
+    """Create a claude session, attach, and print a resume command on exit.
+
+    tmux discards claude's own on-exit output, so once the session ends we read
+    the session-link file the SessionStart hook wrote for this exact pane — it
+    points at claude's transcript — and recover the session id and last prompt to
+    print an exact ``--resume`` command. When a host is attached, ``_session-
+    cleanup`` leaves the link in place (see :func:`cmd_session_cleanup`) so we can
+    read it here. A Ctrl+Q detach leaves the tmux session alive, so we stay quiet.
+    """
+    cmd = build_claude_command(claude_args)
+    name = create_session(
+        container, cmd, cwd=cwd, env=env, unset_vars=unset_vars, sandbox_name=sandbox_name
+    )
+    attach_session(container, name, sandbox_name=sandbox_name)
+
+    if session_exists(container, name):
+        return  # detached, not exited — session is still running
+
+    transcript_path = read_session_link(sandbox_name, name)
+    # The host now owns cleanup for this pane (cleanup deferred to us while attached).
+    clean_session_link(sandbox_name, name)
+    if not transcript_path:
+        return  # session never linked a transcript (e.g. claude quit before startup)
+
+    session_id = session_id_from_transcript(transcript_path)
+    if not session_id:
+        return
+    info = read_session_info_any(transcript_path)
+    last_prompt = (info or {}).get("last_prompt", "")
+    if last_prompt:
+        print(f'\nClaude session ended — "{last_prompt}"')
+    else:
+        print("\nClaude session ended.")
+    print(f"Resume it with:\n  ccbox claude -s {sandbox_name} --resume {session_id}")
+
+
 def cmd_default(config: Config, args: argparse.Namespace) -> None:
     """Default command: find/create sandbox for CWD, manage sessions."""
     cwd = os.getcwd()
@@ -208,11 +264,7 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
         if chosen is not None:
             attach_session(container, chosen, sandbox_name=sandbox_name)
         else:
-            cmd = build_claude_command()
-            name = create_session(
-                container, cmd, cwd=cwd, env=env, unset_vars=unset_vars, sandbox_name=sandbox_name
-            )
-            attach_session(container, name, sandbox_name=sandbox_name)
+            _launch_claude(container, cwd, env, unset_vars, sandbox_name)
     else:
         # CWD doesn't resolve — show unified picker
         result = pick_no_resolve(config, cwd)
@@ -232,26 +284,13 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
             print(f"Creating sandbox '{sandbox_name}' for {cwd}...")
             create_sandbox(config, sandbox_name, mounts=[(cwd, False)])
             container = ensure_running(config, sandbox_name)
-            cmd = build_claude_command()
-            name = create_session(
-                container, cmd, cwd=cwd, env=env, unset_vars=unset_vars, sandbox_name=sandbox_name
-            )
-            attach_session(container, name, sandbox_name=sandbox_name)
+            _launch_claude(container, cwd, env, unset_vars, sandbox_name)
         elif isinstance(result, MountToSandbox):
             from ccbox.mount import add_mount
 
             add_mount(config, result.sandbox, cwd, readonly=result.readonly)
             container = ensure_running(config, result.sandbox)
-            cmd = build_claude_command()
-            name = create_session(
-                container,
-                cmd,
-                cwd=cwd,
-                env=env,
-                unset_vars=unset_vars,
-                sandbox_name=result.sandbox,
-            )
-            attach_session(container, name, sandbox_name=result.sandbox)
+            _launch_claude(container, cwd, env, unset_vars, result.sandbox)
 
 
 def cmd_claude(config: Config, args: argparse.Namespace) -> None:
@@ -266,11 +305,7 @@ def cmd_claude(config: Config, args: argparse.Namespace) -> None:
     claude_args = args.claude_args
     if claude_args and claude_args[0] == "--":
         claude_args = claude_args[1:]
-    cmd = build_claude_command(claude_args)
-    name = create_session(
-        container, cmd, cwd=cwd, env=env, unset_vars=unset_vars, sandbox_name=sandbox_name
-    )
-    attach_session(container, name, sandbox_name=sandbox_name)
+    _launch_claude(container, cwd, env, unset_vars, sandbox_name, claude_args)
 
 
 def cmd_codex(config: Config, args: argparse.Namespace) -> None:

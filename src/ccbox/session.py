@@ -206,18 +206,18 @@ def _build_session_script(
         new_cmd += f" -c {shlex.quote(cwd)}"
     lines.append(new_cmd)
 
-    # Hook: clean up session-link file when tmux session exits naturally.
     # The link dir is on an rw mount (identity-mapped paths), so rm works
     # directly from inside the container.
-    # We build the full link path into a shell var, then embed it literally
-    # in the tmux hook so there are no quoting issues at hook-fire time.
     if session_link_dir and sandbox_name:
         link_dir = f"{session_link_dir}/{sandbox_name}"
         lines.append(f'_link="{link_dir}/$name"')
         # Remove stale link from a previous session in this slot before Claude
         # starts — avoids racing with the SessionStart hook that writes the new link.
         lines.append('rm -f "$_link"')
-        lines.append('tmux set-hook -t "$name" session-closed "run-shell \'rm -f $_link\'"')
+        # NB: no tmux session-closed hook here. The inline `ccbox _session-cleanup`
+        # below runs on every natural exit and is the sole link cleaner, so that an
+        # attached host can defer cleanup and read the link (for the resume hint)
+        # before it's removed. A session-closed hook would race that read away.
 
     # Inject env vars via tmux set-environment (includes CCBOX_TMUX_SESSION)
     env["CCBOX_TMUX_SESSION"] = "$name"  # resolved by the shell
@@ -245,8 +245,9 @@ def _build_session_script(
     lines.append(respawn)
 
     # exec replaces bash — exiting the command kills the tmux session.
-    # When session_link_dir is set, use inline cleanup so the link is removed
-    # even when the tmux server shuts down (session-closed hook is unreliable then).
+    # When session_link_dir is set, run inline cleanup on exit (before the pane
+    # closes) so it fires reliably even when this is the last session and the
+    # tmux server shuts down. It also lets an attached host defer link cleanup.
     if session_link_dir and sandbox_name:
         send_cmd = f"{command}; ccbox _session-cleanup; exit"
     else:
@@ -374,6 +375,31 @@ def build_claude_command(extra_args: list[str] | None = None) -> str:
                 continue
             parts.append(arg)
     return shlex.join(parts)
+
+
+def session_exists(container: str, name: str) -> bool:
+    """True if a tmux session with exactly *name* is still alive in the container.
+
+    Used after an attach returns to tell a natural exit (session gone) apart from
+    a Ctrl+Q detach (session still present).
+    """
+    return any(s["name"] == name for s in list_sessions(container))
+
+
+def read_session_link(sandbox_name: str, session_name: str) -> str | None:
+    """Return the transcript path recorded for a tmux session, or None.
+
+    The SessionStart hook writes the transcript path into the session-link file
+    (see ``cmd_session_link``); this reads it back so the exact session that ran
+    in a pane can be identified without guessing.
+    """
+    from ccbox.config import SESSION_LINK_DIR
+
+    try:
+        text = (SESSION_LINK_DIR / sandbox_name / session_name).read_text().strip()
+    except OSError:
+        return None
+    return text or None
 
 
 def _find_codex() -> str | None:

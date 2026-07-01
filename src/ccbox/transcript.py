@@ -154,6 +154,33 @@ def read_codex_session_info(transcript_path: str) -> dict | None:
     }
 
 
+def session_id_from_transcript(transcript_path: str) -> str:
+    """Return the Claude session id for a transcript path.
+
+    Claude names each transcript ``<sessionId>.jsonl``, so the id is the file's
+    stem. Falls back to reading the ``sessionId`` field from the file if the
+    name is not in that form.
+    """
+    base = os.path.basename(transcript_path)
+    if base.endswith(".jsonl"):
+        return base[: -len(".jsonl")]
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    sid = _extract_session_id(json.loads(line))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if sid:
+                    return sid
+    except OSError:
+        pass
+    return ""
+
+
 def read_session_info_any(transcript_path: str) -> dict | None:
     """Auto-detect transcript format and extract session info."""
     try:
