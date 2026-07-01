@@ -69,8 +69,10 @@ class PruneStaleMountsTests(unittest.TestCase):
         remove.assert_not_called()
 
     def test_running_container_orphaned_inode_is_pruned(self) -> None:
+        # A genuine replacement changes the host key, so stored != current is the
+        # trigger; the container still holds the old (orphaned) inode.
         with tempfile.TemporaryDirectory() as d:
-            cfg = _config_with_mount(d, stored_inode=_inode_key(d))
+            cfg = _config_with_mount(d, stored_inode="111:111")  # differs from current
             host_ino = os.stat(d).st_ino
             with (
                 patch("ccbox.mount.lxd.container_state", return_value="Running"),
@@ -82,6 +84,24 @@ class PruneStaleMountsTests(unittest.TestCase):
         self.assertEqual(pruned, [d])
         remove.assert_called_once()
         self.assertEqual(cfg.get_sandbox("demo").mounts, [])
+
+    def test_matching_stored_inode_skips_container_probe(self) -> None:
+        """Perf: when the stored key already matches the host, no container_state
+        query and no per-mount `lxc exec` inode probe happen at all."""
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _config_with_mount(d, stored_inode=_inode_key(d))  # already adopted
+            with (
+                patch("ccbox.mount.lxd.container_state") as cstate,
+                patch("ccbox.mount.lxd.remove_disk_device") as remove,
+                patch("ccbox.mount._container_ino") as cino,
+            ):
+                pruned = prune_stale_mounts(cfg, "demo")
+
+            self.assertEqual(pruned, [])
+            cstate.assert_not_called()  # lazy: not even the state query runs
+            cino.assert_not_called()
+            remove.assert_not_called()
+            self.assertEqual(cfg.saves, 0)  # nothing changed → no write
 
     def test_missing_host_path_is_pruned_regardless_of_state(self) -> None:
         missing = "/nonexistent/ccbox/mount/path"

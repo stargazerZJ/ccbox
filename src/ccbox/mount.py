@@ -64,19 +64,22 @@ def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
     points at a different inode than the host (dir was moved/deleted+recreated —
     LXD still follows the old, orphaned inode).
 
-    Staleness is decided by comparing the *running container's* inode against
-    the host's current inode, NOT the stored ``dev:ino``. Stored ``dev:ino`` is
-    host-local — device numbers differ across machines and across reboots (ZFS
-    pools reimport with new dev numbers) — so a replicated/migrated state.json
-    carries the origin host's values. Trusting them would flag every mount as
-    "replaced" on the peer and wipe all bind mounts on each invocation. When the
-    container isn't running there is nothing orphaned to detect, so only the
-    path-missing case prunes; a stopped container re-applies its devices at
-    start pointing at the local paths.
+    The stored ``dev:ino`` is only a cheap *pre-filter*, never the verdict: it is
+    host-local (device numbers differ across machines and across reboots — ZFS
+    pools reimport with new dev numbers), so a replicated/migrated state.json
+    carries the origin host's values and would otherwise flag every mount as
+    "replaced" and wipe all bind mounts. So when the stored key differs from the
+    current host key (or was never recorded), we do NOT trust it — we confirm
+    against the *running container's* inode: a genuine replacement is one where
+    the container still holds the old, orphaned inode while the host exposes a new
+    one. When the key already matches, nothing changed and we skip the (per-mount,
+    relatively expensive) container probe entirely — so the steady-state path
+    makes zero ``lxc exec`` calls. When the container isn't running there is
+    nothing orphaned to detect; a stopped container re-binds the local path at
+    start.
 
-    Kept entries have their stored inode re-stamped to the local value so
-    ``--list`` output and future same-host checks stay accurate after a
-    migration.
+    Kept entries have their stored inode re-stamped (adopted) to the local value
+    so a migrated state.json converges after one pass and later runs stay cheap.
 
     Returns list of pruned paths (for caller to report).
     """
@@ -84,7 +87,7 @@ def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
     if entry is None:
         return []
 
-    running = lxd.container_state(entry.container) == "Running"
+    running: bool | None = None  # queried lazily, only if a mount looks suspicious
 
     pruned: list[str] = []
     keep: list[MountEntry] = []
@@ -94,14 +97,17 @@ def prune_stale_mounts(config: Config, sandbox_name: str) -> list[str]:
         cur = _inode_key(m.path)
         if cur is None:
             reason = "no longer exists on host"
-        elif running:
-            # Portable staleness check: does the container still see the same
-            # inode the host currently exposes? A mismatch means the host dir
-            # was replaced while the old inode stayed bind-mounted.
-            target = m.target or m.path
-            container_ino = _container_ino(entry.container, target)
-            if container_ino is not None and os.stat(m.path).st_ino != container_ino:
-                reason = "replaced by a different directory"
+        elif m.inode is not None and cur != m.inode:
+            # Recorded host key changed — suspicious, but the key alone can't be
+            # trusted (foreign/rebooted state). Confirm against the live container:
+            # only a RUNNING container can still hold an orphaned bind mount.
+            if running is None:
+                running = lxd.container_state(entry.container) == "Running"
+            if running:
+                target = m.target or m.path
+                container_ino = _container_ino(entry.container, target)
+                if container_ino is not None and os.stat(m.path).st_ino != container_ino:
+                    reason = "replaced by a different directory"
 
         if reason:
             dev_name = device_name_from_path(m.path)
@@ -220,45 +226,39 @@ def ensure_uv_shim() -> None:
 
 
 def ensure_tmux_conf() -> None:
-    """Deploy assets/tmux.conf to ~/.config/ccbox/tmux.conf.
+    """Seed ~/.config/ccbox/tmux.conf from assets/tmux.conf only if it is missing.
 
-    Copies on every sandbox start so edits to the asset propagate automatically.
+    tmux.conf is user-configurable and meant to be two-way synced across hosts,
+    so once the file exists ccbox never overwrites it — local edits (and edits
+    arriving via sync) survive. Only a host with no file yet gets the asset as a
+    starting point.
     """
     from ccbox.config import STATE_DIR
 
     dest = STATE_DIR / "tmux.conf"
+    if dest.exists():
+        return
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-
     asset_ref = importlib.resources.files("ccbox").parent.parent / "assets" / "tmux.conf"
-    content = asset_ref.read_text()
-
-    try:
-        if dest.exists() and dest.read_text() == content:
-            return
-    except (UnicodeDecodeError, OSError):
-        pass
-    dest.write_text(content)
+    dest.write_text(asset_ref.read_text())
 
 
 def ensure_profile_script() -> None:
-    """Deploy assets/ccbox-profile.sh to ~/.config/ccbox/profile.sh.
+    """Seed ~/.config/ccbox/profile.sh from assets/ccbox-profile.sh only if missing.
 
-    Copies on every sandbox start so edits to the asset propagate automatically.
+    profile.sh is user-configurable and meant to be two-way synced across hosts,
+    so once the file exists ccbox never overwrites it — local edits (and edits
+    arriving via sync) survive. Only a host with no file yet gets the asset as a
+    starting point.
     """
     from ccbox.config import STATE_DIR
 
     dest = STATE_DIR / "profile.sh"
+    if dest.exists():
+        return
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-
     asset_ref = importlib.resources.files("ccbox").parent.parent / "assets" / "ccbox-profile.sh"
-    content = asset_ref.read_text()
-
-    try:
-        if dest.exists() and dest.read_text() == content:
-            return
-    except (UnicodeDecodeError, OSError):
-        pass
-    dest.write_text(content)
+    dest.write_text(asset_ref.read_text())
 
 
 def _normalize_mount(m: MountEntry) -> MountEntry | None:
