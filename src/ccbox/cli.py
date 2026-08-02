@@ -244,7 +244,7 @@ def _launch_claude(
         print(f'\nClaude session ended — "{last_prompt}"')
     else:
         print("\nClaude session ended.")
-    print(f"Resume it with:\n  ccbox claude -s {sandbox_name} --resume {session_id}")
+    print(f"Resume it with:\n  ccbox claude -s {sandbox_name} -- --resume {session_id}")
 
 
 def cmd_default(config: Config, args: argparse.Namespace) -> None:
