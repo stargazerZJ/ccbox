@@ -208,9 +208,7 @@ class State:
             return HostConfig(storage_pool=self.storage_pool)
         # Fill an unset storage_pool from the legacy global value.
         if hc.storage_pool is None and self.storage_pool is not None:
-            return HostConfig(
-                storage_pool=self.storage_pool, network=hc.network, wg_ip=hc.wg_ip
-            )
+            return HostConfig(storage_pool=self.storage_pool, network=hc.network, wg_ip=hc.wg_ip)
         return hc
 
     def to_dict(self) -> dict:
