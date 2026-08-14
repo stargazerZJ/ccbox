@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
 
 from rich.console import Console
 from rich.text import Text
@@ -12,10 +11,9 @@ from textual.app import App, ComposeResult
 from textual.widgets import Input, OptionList
 from textual.widgets.option_list import Option
 
-from ccbox import lxd
-from ccbox.config import SESSION_LINK_DIR, Config
-from ccbox.session import _is_session_attached
-from ccbox.transcript import read_session_info_any, relative_time
+from ccbox.config import Config
+from ccbox.session import list_all_sessions, read_session_binding
+from ccbox.transcript import read_latest_ai_title
 
 console = Console()
 
@@ -57,52 +55,32 @@ class RecentSession:
     sandbox: str
     tmux_name: str
     container: str
-    info: dict | None  # from read_session_info_any
+    info: dict | None
     attached: bool = False
+    created: int = 0
 
 
 def _session_info(sandbox_name: str, tmux_session: str) -> dict | None:
-    """Read session info for a tmux session via its session-link pointer."""
-    link_file = SESSION_LINK_DIR / sandbox_name / tmux_session
-    try:
-        transcript_path = link_file.read_text().strip()
-    except OSError:
+    """Read optional Claude binding and current automatic title."""
+    binding = read_session_binding(sandbox_name, tmux_session)
+    if binding is None:
         return None
-    if not transcript_path:
-        return None
-    return read_session_info_any(transcript_path)
+    return {
+        **binding,
+        "title": read_latest_ai_title(binding["transcript_path"], binding["session_id"]),
+    }
 
 
 def _format_detail(info: dict | None) -> str:
-    """Format session metadata into a detail string."""
+    """Format a live runtime's title state."""
     if info is None:
-        return ""
-    parts = []
-    if info.get("last_prompt"):
-        prompt = info["last_prompt"]
-        if len(prompt) > 50:
-            prompt = prompt[:47] + "..."
-        parts.append(f'"{prompt}"')
-    ts = relative_time(info.get("timestamp", ""))
-    if ts:
-        parts.append(ts)
-    if info.get("git_branch"):
-        parts.append(info["git_branch"])
-    count = info.get("message_count", 0)
-    if count:
-        parts.append(f"{count} msg{'s' if count != 1 else ''}")
-    return " \u00b7 ".join(parts)
-
-
-def _parse_timestamp(info: dict | None) -> float:
-    """Extract a sortable timestamp (epoch seconds) from session info. 0 if unknown."""
-    if not info or not info.get("timestamp"):
-        return 0.0
-    try:
-        dt = datetime.fromisoformat(info["timestamp"].replace("Z", "+00:00"))
-        return dt.timestamp()
-    except (ValueError, TypeError):
-        return 0.0
+        return "(starting)"
+    title = info.get("title")
+    if not title:
+        return "(untitled)"
+    if len(title) > 70:
+        return title[:67] + "..."
+    return title
 
 
 def _styled_option(
@@ -303,44 +281,24 @@ def pick_session(sessions: list[dict], sandbox_name: str) -> str | None:
 
 
 def _collect_recent_sessions(config: Config) -> list[RecentSession]:
-    """Gather recent sessions across all sandboxes (running containers only)."""
+    """Gather live runtimes across all running sandboxes."""
     results: list[RecentSession] = []
-
-    if not SESSION_LINK_DIR.is_dir():
-        return results
-
-    # Batch-fetch all container states in one API call
-    container_states = lxd.all_container_states()
-
-    for sandbox_dir in SESSION_LINK_DIR.iterdir():
-        if not sandbox_dir.is_dir():
-            continue
-        sandbox_name = sandbox_dir.name
-        entry = config.get_sandbox(sandbox_name)
-        if entry is None:
-            continue
-        # Only check running containers
-        if container_states.get(entry.container) != "Running":
-            continue
-        # Trust session-link cache — no lxc exec needed
-        for link_file in sandbox_dir.iterdir():
-            if ".attached" in link_file.name:
-                continue  # skip per-PID marker files
-            tmux_name = link_file.name
-            info = _session_info(sandbox_name, tmux_name)
-            results.append(
-                RecentSession(
-                    sandbox=sandbox_name,
-                    tmux_name=tmux_name,
-                    container=entry.container,
-                    info=info,
-                    attached=_is_session_attached(sandbox_name, tmux_name),
-                )
+    for runtime in list_all_sessions(config):
+        sandbox_name = runtime["sandbox"]
+        tmux_name = runtime["name"]
+        results.append(
+            RecentSession(
+                sandbox=sandbox_name,
+                tmux_name=tmux_name,
+                container=runtime["container"],
+                info=_session_info(sandbox_name, tmux_name),
+                attached=runtime["attached"],
+                created=runtime["created"],
             )
+        )
 
-    # Sort by recency (most recent first)
-    results.sort(key=lambda r: _parse_timestamp(r.info), reverse=True)
-    return results[:10]
+    results.sort(key=lambda runtime: runtime.created, reverse=True)
+    return results
 
 
 def pick_no_resolve(config: Config, cwd: str) -> PickResult:

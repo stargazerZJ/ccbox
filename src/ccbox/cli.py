@@ -7,7 +7,7 @@ import os
 import sys
 
 from ccbox import lxd
-from ccbox.config import SESSION_LINK_DIR, Config, ProxyEntry
+from ccbox.config import Config, ProxyEntry
 from ccbox.mount import add_mount, remove_mount, sync_auto_mounts
 from ccbox.picker import (
     AttachSession,
@@ -34,26 +34,24 @@ from ccbox.sandbox import (
     stop_sandbox,
 )
 from ccbox.session import (
-    _is_session_attached,
     attach_session,
     build_claude_command,
     build_codex_command,
-    cached_sessions_with_state,
-    clean_session_link,
+    clean_session_binding,
     create_session,
     get_forwarded_env,
     get_unset_env_vars,
     kill_all_sessions,
     kill_session,
+    list_all_sessions,
     list_sessions,
-    read_session_link,
+    read_session_binding,
     sandbox_env,
     session_exists,
+    write_session_binding,
 )
 from ccbox.transcript import (
-    read_session_info_any,
-    relative_time,
-    session_id_from_transcript,
+    read_latest_ai_title,
 )
 
 
@@ -96,9 +94,9 @@ def _parse_sandbox_session(spec: str) -> tuple[str, str] | None:
     return None
 
 
-def resolve_session(container: str, name: str | None) -> str:
+def resolve_session(sandbox_name: str, name: str | None) -> str:
     """Return a session name, prompting with a picker if name is None and multiple exist."""
-    sessions = list_sessions(container)
+    sessions = list_sessions(sandbox_name)
     if name is not None:
         return name  # trust caller; tmux will error if invalid
     if len(sessions) == 0:
@@ -117,15 +115,14 @@ def resolve_session(container: str, name: str | None) -> str:
 
 
 def _session_info(sandbox_name: str, tmux_session: str) -> dict | None:
-    """Read session info for a tmux session via its session-link pointer."""
-    link_file = SESSION_LINK_DIR / sandbox_name / tmux_session
-    try:
-        transcript_path = link_file.read_text().strip()
-    except OSError:
+    """Read the optional Claude binding and latest automatic title."""
+    binding = read_session_binding(sandbox_name, tmux_session)
+    if binding is None:
         return None
-    if not transcript_path:
-        return None
-    return read_session_info_any(transcript_path)
+    return {
+        **binding,
+        "title": read_latest_ai_title(binding["transcript_path"], binding["session_id"]),
+    }
 
 
 def _format_session_line(
@@ -133,43 +130,12 @@ def _format_session_line(
 ) -> str:
     """Format a single session line for the picker."""
     status = "attached" if attached else "detached"
-    if info is None:
-        return f"  [{index}] {tmux_name} ({status})"
-    parts = []
-    if info["last_prompt"]:
-        prompt = info["last_prompt"]
-        if len(prompt) > 60:
-            prompt = prompt[:57] + "..."
-        parts.append(f'"{prompt}"')
-    ts = relative_time(info["timestamp"])
-    if ts:
-        parts.append(ts)
-    if info["git_branch"]:
-        parts.append(info["git_branch"])
-    count = info.get("message_count", 0)
-    if count:
-        parts.append(f"{count} msg{'s' if count != 1 else ''}")
-    detail = " · ".join(parts)
+    detail = "(starting)" if info is None else info.get("title") or "(untitled)"
     return f"  [{index}] {tmux_name} ({status})  {detail}"
 
 
-def cmd_session_cleanup(config: Config, args: argparse.Namespace) -> None:
-    """Internal: called by session shell to clean up session-link on natural exit."""
-    sandbox = os.environ.get("CCBOX_SANDBOX", "")
-    tmux_session = os.environ.get("CCBOX_TMUX_SESSION", "")
-    if not sandbox or not tmux_session:
-        return  # no-op outside ccbox containers
-    # This runs (as `command; ccbox _session-cleanup; exit`) while the pane is
-    # still up, so an attached host is still holding its .attached marker. Leave
-    # the link for that host to read (it prints a resume hint, then cleans up).
-    # Only self-clean when no host is watching (e.g. a detached session exiting).
-    if _is_session_attached(sandbox, tmux_session):
-        return
-    clean_session_link(sandbox, tmux_session)
-
-
-def cmd_session_link(config: Config, args: argparse.Namespace) -> None:
-    """Internal: called by SessionStart hook to link tmux↔transcript session."""
+def cmd_session_bind(config: Config, args: argparse.Namespace) -> None:
+    """Internal: atomically bind this tmux runtime to a Claude conversation."""
     import json as _json
 
     sandbox = os.environ.get("CCBOX_SANDBOX", "")
@@ -182,14 +148,21 @@ def cmd_session_link(config: Config, args: argparse.Namespace) -> None:
     except (_json.JSONDecodeError, ValueError):
         return
 
-    transcript_path = hook_input.get("transcript_path", "")
-    if not transcript_path:
+    try:
+        write_session_binding(sandbox, tmux_session, hook_input)
+    except (OSError, ValueError):
         return
 
-    link_dir = SESSION_LINK_DIR / sandbox
-    link_dir.mkdir(parents=True, exist_ok=True)
-    link_file = link_dir / tmux_session
-    link_file.write_text(transcript_path + "\n")
+
+def _attach_or_report(container: str, sandbox_name: str, runtime_name: str) -> bool:
+    """Attach, refreshing once when selection raced with runtime exit."""
+    if attach_session(container, runtime_name, sandbox_name=sandbox_name):
+        return True
+    if not session_exists(sandbox_name, runtime_name):
+        print(f"Runtime '{sandbox_name}/{runtime_name}' ended before it could be attached.")
+        return False
+    print(f"Could not attach to runtime '{sandbox_name}/{runtime_name}'.", file=sys.stderr)
+    return False
 
 
 def cmd_resolve(config: Config, args: argparse.Namespace) -> None:
@@ -213,12 +186,8 @@ def _launch_claude(
 ) -> None:
     """Create a claude session, attach, and print a resume command on exit.
 
-    tmux discards claude's own on-exit output, so once the session ends we read
-    the session-link file the SessionStart hook wrote for this exact pane — it
-    points at claude's transcript — and recover the session id and last prompt to
-    print an exact ``--resume`` command. When a host is attached, ``_session-
-    cleanup`` leaves the link in place (see :func:`cmd_session_cleanup`) so we can
-    read it here. A Ctrl+Q detach leaves the tmux session alive, so we stay quiet.
+    Once the runtime ends, the SessionStart binding provides the exact UUID for
+    a resume hint. A Ctrl+Q detach leaves the runtime alive, so we stay quiet.
     """
     cmd = build_claude_command(claude_args)
     name = create_session(
@@ -226,25 +195,19 @@ def _launch_claude(
     )
     attach_session(container, name, sandbox_name=sandbox_name)
 
-    if session_exists(container, name):
+    if session_exists(sandbox_name, name):
         return  # detached, not exited — session is still running
 
-    transcript_path = read_session_link(sandbox_name, name)
-    # The host now owns cleanup for this pane (cleanup deferred to us while attached).
-    clean_session_link(sandbox_name, name)
-    if not transcript_path:
-        return  # session never linked a transcript (e.g. claude quit before startup)
-
-    session_id = session_id_from_transcript(transcript_path)
-    if not session_id:
+    binding = read_session_binding(sandbox_name, name)
+    clean_session_binding(sandbox_name, name)
+    if binding is None:
         return
-    info = read_session_info_any(transcript_path)
-    last_prompt = (info or {}).get("last_prompt", "")
-    if last_prompt:
-        print(f'\nClaude session ended — "{last_prompt}"')
+    title = read_latest_ai_title(binding["transcript_path"], binding["session_id"])
+    if title:
+        print(f'\nClaude session ended — "{title}"')
     else:
         print("\nClaude session ended.")
-    print(f"Resume it with:\n  ccbox claude -s {sandbox_name} -- --resume {session_id}")
+    print(f"Resume it with:\n  ccbox claude -s {sandbox_name} -- --resume {binding['session_id']}")
 
 
 def cmd_default(config: Config, args: argparse.Namespace) -> None:
@@ -258,11 +221,11 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
     if sandbox_name is not None:
         # CWD resolves — use session picker within this sandbox
         container = ensure_running(config, sandbox_name)
-        sessions = list_sessions(container)
+        sessions = list_sessions(sandbox_name)
 
         chosen = pick_session(sessions, sandbox_name)
         if chosen is not None:
-            attach_session(container, chosen, sandbox_name=sandbox_name)
+            _attach_or_report(container, sandbox_name, chosen)
         else:
             _launch_claude(container, cwd, env, unset_vars, sandbox_name)
     else:
@@ -271,7 +234,7 @@ def cmd_default(config: Config, args: argparse.Namespace) -> None:
 
         if isinstance(result, AttachSession):
             container = ensure_running(config, result.sandbox)
-            attach_session(container, result.session, sandbox_name=result.sandbox)
+            _attach_or_report(container, result.sandbox, result.session)
         elif isinstance(result, NewSandbox):
             sandbox_name = result.name
             # Deduplicate name if it already exists
@@ -387,7 +350,7 @@ def cmd_sessions(config: Config, args: argparse.Namespace) -> None:
         return
 
     # Live tmux query for accurate attached state
-    sessions = list_sessions(entry.container)
+    sessions = list_sessions(sandbox_name)
 
     if not sessions:
         print(f"No sessions in sandbox '{sandbox_name}'.")
@@ -397,42 +360,22 @@ def cmd_sessions(config: Config, args: argparse.Namespace) -> None:
     for i, s in enumerate(sessions):
         info = _session_info(sandbox_name, s["name"])
         print(_format_session_line(i, s["name"], info, attached=s["attached"]))
-        # Warn on mismatch between live tmux state and .attached marker files
-        cached_attached = _is_session_attached(sandbox_name, s["name"])
-        if s["attached"] and not cached_attached:
-            print(
-                "    [warn] tmux says attached but no .attached marker — "
-                "session may be attached outside ccbox",
-                file=sys.stderr,
-            )
-        elif not s["attached"] and cached_attached:
-            print(
-                "    [warn] tmux says detached but stale .attached marker exists — "
-                "ccbox may have crashed without cleanup",
-                file=sys.stderr,
-            )
 
 
 def _cmd_sessions_all(config: Config) -> None:
     """List sessions across all sandboxes."""
-    from ccbox import lxd as _lxd
-
-    # Batch-fetch all container states in one API call
-    container_states = _lxd.all_container_states()
-
-    # Use session-link cache with .attached markers — no lxc exec calls needed
+    sessions = list_all_sessions(config)
+    sessions.sort(key=lambda session: (session["sandbox"], session["created"]))
     total = 0
-    for name, entry in config.state.sandboxes.items():
-        if container_states.get(entry.container) != "Running":
-            continue
-        sessions = cached_sessions_with_state(name)
-        if not sessions:
+    for name in config.state.sandboxes:
+        sandbox_sessions = [session for session in sessions if session["sandbox"] == name]
+        if not sandbox_sessions:
             continue
         print(f"{name}:")
-        for i, s in enumerate(sessions):
+        for i, s in enumerate(sandbox_sessions):
             info = _session_info(name, s["name"])
             print(_format_session_line(i, f"{name}/{s['name']}", info, attached=s["attached"]))
-        total += len(sessions)
+        total += len(sandbox_sessions)
         print()
     if total == 0:
         print("No sessions in any sandbox.")
@@ -462,15 +405,15 @@ def cmd_attach(config: Config, args: argparse.Namespace) -> None:
         raise
     container = ensure_running(config, sandbox_name)
     if session_arg is not None:
-        session_name = resolve_session(container, session_arg)
+        session_name = resolve_session(sandbox_name, session_arg)
     else:
-        sessions = list_sessions(container)
+        sessions = list_sessions(sandbox_name)
         session_name = pick_session(sessions, sandbox_name)
         if session_name is None:
             # User chose "new session" — not applicable for attach
             print("No session selected.")
             return
-    attach_session(container, session_name, sandbox_name=sandbox_name)
+    _attach_or_report(container, sandbox_name, session_name)
 
 
 def _cmd_attach_all(config: Config) -> None:
@@ -480,7 +423,7 @@ def _cmd_attach_all(config: Config) -> None:
         print("No session selected.")
         return
     container = ensure_running(config, result.sandbox)
-    attach_session(container, result.session, sandbox_name=result.sandbox)
+    _attach_or_report(container, result.sandbox, result.session)
 
 
 def cmd_kill(config: Config, args: argparse.Namespace) -> None:
@@ -499,7 +442,7 @@ def cmd_kill(config: Config, args: argparse.Namespace) -> None:
         kill_all_sessions(container, sandbox_name=sandbox_name)
         print(f"All sessions killed in sandbox '{sandbox_name}'.")
     else:
-        session_name = resolve_session(container, args.session)
+        session_name = resolve_session(sandbox_name, session_arg)
         kill_session(container, session_name, sandbox_name=sandbox_name)
         print(f"Session '{session_name}' killed.")
 
@@ -1128,11 +1071,8 @@ def build_parser() -> argparse.ArgumentParser:
     mounts_sub.add_parser("list", help="List auto-mounts")
     mounts_sub.add_parser("reset", help="Reset to defaults")
 
-    # ccbox _session-link  (internal: Claude hook)
-    sub.add_parser("_session-link", help=argparse.SUPPRESS)
-
-    # ccbox _session-cleanup  (internal: called by pane shell on natural exit)
-    sub.add_parser("_session-cleanup", help=argparse.SUPPRESS)
+    # ccbox _session-bind  (internal: Claude SessionStart hook)
+    sub.add_parser("_session-bind", help=argparse.SUPPRESS)
 
     return parser
 
@@ -1157,8 +1097,7 @@ COMMAND_MAP = {
     "cp": cmd_cp,
     "resolve": cmd_resolve,
     "config": cmd_config,
-    "_session-link": cmd_session_link,
-    "_session-cleanup": cmd_session_cleanup,
+    "_session-bind": cmd_session_bind,
 }
 
 

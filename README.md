@@ -41,6 +41,10 @@ ccbox creates an LXD container, bind-mounts your project directory (rw) and tool
 
 It also sets `CLAUDE_CONFIG_DIR=~/.claude` inside the container, so Claude writes mutable config under the mounted `~/.claude` directory instead of `~/.claude.json`.
 
+Live runtimes are discovered directly from a per-sandbox tmux socket. Claude's
+`SessionStart` hook should run `ccbox _session-bind`; this binds the runtime to
+the exact Claude session UUID and lets the picker display Claude's automatic title.
+
 ### uv hardlink deferral
 
 Python package managers like uv use hardlinks from a shared cache to `.venv` for fast installs. Inside a container, the cache and project live on different mount points, so hardlinks fail.
@@ -75,7 +79,7 @@ src/ccbox/
   cli.py          # CLI entry point and subcommand routing
   config.py       # State file (~/.config/ccbox/state.json), mount definitions
   sandbox.py      # Sandbox lifecycle (create, start, stop, remove)
-  session.py      # Tmux session management, env forwarding
+  session.py      # Shared tmux sockets, runtime bindings, env forwarding
   lxd.py          # LXD command wrappers (lxc exec, config, etc.)
   mount.py        # Bind mount management (add, remove, auto-mounts)
   init.py         # First-run initialization
@@ -104,7 +108,7 @@ These host paths are bind-mounted into every sandbox:
 | `~/.local/share/uv` | rw | Managed Python installations |
 | `~/.config/uv` | ro | uv settings |
 | `~/.config/ccbox/bin/uv` → `~/.local/bin/uv` | ro | Patched uv binary |
-| `~/.config/ccbox/run` | rw | Unix socket for hardlink server |
+| `~/.cache/ccbox/run` | rw | uv/tmux sockets and Claude runtime bindings |
 | `~/.nvm` | ro | Node.js runtime and Codex CLI binary |
 | `~/.codex` | rw | Codex auth, config, state, and sessions |
 

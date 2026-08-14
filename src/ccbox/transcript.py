@@ -16,6 +16,39 @@ _CLAUDE_HISTORY_CACHE: dict[str, dict[str, str]] = {}
 _CLAUDE_HISTORY_CACHE_SIG: tuple[str, int, int] | None = None
 
 
+def read_latest_ai_title(
+    transcript_path: str, session_id: str, max_tail_bytes: int = 256 * 1024
+) -> str | None:
+    """Read the newest matching Claude ``ai-title`` from a bounded JSONL tail."""
+    if not session_id or max_tail_bytes <= 0:
+        return None
+    try:
+        with open(transcript_path, "rb") as transcript:
+            transcript.seek(0, os.SEEK_END)
+            size = transcript.tell()
+            start = max(0, size - max_tail_bytes)
+            transcript.seek(start)
+            data = transcript.read(max_tail_bytes)
+    except OSError:
+        return None
+
+    # If the bounded read starts mid-record, that first fragment simply fails
+    # JSON decoding. Keeping it also handles the exact line-boundary case.
+    for raw_line in reversed(data.splitlines()):
+        try:
+            entry = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "ai-title":
+            continue
+        if entry.get("sessionId") != session_id:
+            continue
+        title = entry.get("aiTitle")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    return None
+
+
 def read_session_info(transcript_path: str) -> dict | None:
     """Extract session info from a Claude Code transcript and history.
 

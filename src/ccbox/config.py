@@ -125,7 +125,8 @@ CACHE_DIR = Path.home() / ".cache" / "ccbox"
 RUN_DIR = CACHE_DIR / "run"
 SHIM_DIR = STATE_DIR / "bin"
 UV_SOCK = RUN_DIR / "uv.sock"
-SESSION_LINK_DIR = RUN_DIR / "session-links"
+TMUX_SOCKET_DIR = RUN_DIR / "tmux"
+SESSION_BINDING_DIR = RUN_DIR / "session-bindings"
 
 
 def _default_auto_mounts() -> list[MountEntry]:
@@ -147,7 +148,7 @@ def _default_auto_mounts() -> list[MountEntry]:
         MountEntry(path=f"{home}/.cache/huggingface", mode="rw", optional=True),
         # uv shim → ~/.local/bin/uv inside the container
         MountEntry(path=str(SHIM_DIR / "uv"), mode="ro", target=f"{home}/.local/bin/uv"),
-        # Socket directory for host↔container uv channel + session links
+        # Socket directory for host↔container uv/tmux channels + runtime bindings
         MountEntry(path=str(RUN_DIR), mode="rw"),
         # Codex CLI (via nvm) — optional, only if nvm is installed
         MountEntry(path=f"{home}/.nvm", mode="ro", optional=True),

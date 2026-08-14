@@ -205,5 +205,47 @@ class ClaudeSessionInfoTests(unittest.TestCase):
         return entry
 
 
+class ClaudeAiTitleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.path = Path(self.tempdir.name) / "session.jsonl"
+
+    def test_returns_latest_title_matching_bound_session(self) -> None:
+        self._write(
+            [
+                {"type": "ai-title", "aiTitle": "Old title", "sessionId": "session-1"},
+                {"type": "ai-title", "aiTitle": "Other title", "sessionId": "session-2"},
+                {"type": "ai-title", "aiTitle": "New title", "sessionId": "session-1"},
+            ]
+        )
+
+        self.assertEqual(transcript.read_latest_ai_title(str(self.path), "session-1"), "New title")
+
+    def test_tolerates_partial_tail_line_malformed_json_and_partial_append(self) -> None:
+        prefix = {"type": "user", "message": {"content": "x" * 300}}
+        title = {"type": "ai-title", "aiTitle": "Bounded title", "sessionId": "session-1"}
+        with self.path.open("wb") as output:
+            output.write(json.dumps(prefix).encode() + b"\n")
+            output.write(b"not json\n")
+            output.write(json.dumps(title).encode() + b"\n")
+            output.write(b'{"type":"ai-title","aiTitle":"unfinished"')
+
+        self.assertEqual(
+            transcript.read_latest_ai_title(str(self.path), "session-1", max_tail_bytes=180),
+            "Bounded title",
+        )
+
+    def test_missing_or_non_matching_title_returns_none(self) -> None:
+        self._write([{"type": "ai-title", "aiTitle": "Other", "sessionId": "session-2"}])
+
+        self.assertIsNone(transcript.read_latest_ai_title(str(self.path), "session-1"))
+
+    def _write(self, entries: list[dict]) -> None:
+        with self.path.open("w", encoding="utf-8") as output:
+            for entry in entries:
+                output.write(json.dumps(entry) + "\n")
+
+
 if __name__ == "__main__":
     unittest.main()

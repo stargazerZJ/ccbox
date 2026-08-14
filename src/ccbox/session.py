@@ -1,88 +1,126 @@
-"""Tmux session lifecycle inside LXD containers."""
+"""Tmux runtime lifecycle and Claude conversation bindings."""
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
+import shutil
+import subprocess
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from ccbox import lxd
 
 CONTAINER_USER = "1000"  # UID for the mapped user
 TMUX_CONF = f"{os.path.expanduser('~')}/.config/ccbox/tmux.conf"
+_SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_TMUX_FORMAT = "#{session_name}|#{session_attached}|#{session_created}"
 
 
-def cached_session_names(sandbox_name: str) -> list[str]:
-    """List session names from session-link cache (no lxc calls).
-
-    Returns session names that have link files. May include stale entries
-    if a session exited without cleanup, but is fast (local filesystem only).
-    """
-    from ccbox.config import SESSION_LINK_DIR
-
-    link_dir = SESSION_LINK_DIR / sandbox_name
-    if not link_dir.is_dir():
-        return []
-    return [f.name for f in link_dir.iterdir() if ".attached" not in f.name]
+def _validate_component(value: str, label: str) -> str:
+    if not isinstance(value, str) or not _SAFE_COMPONENT_RE.fullmatch(value):
+        raise ValueError(f"Invalid {label}: {value!r}")
+    return value
 
 
-def cached_sessions_with_state(sandbox_name: str) -> list[dict]:
-    """Like cached_session_names but includes attached state from per-PID marker files.
+def tmux_socket_path(sandbox_name: str) -> Path:
+    """Return the explicit shared tmux socket for a sandbox."""
+    from ccbox.config import TMUX_SOCKET_DIR
 
-    Returns list of dicts with keys: name, attached.
-    """
-    from ccbox.config import SESSION_LINK_DIR
-
-    link_dir = SESSION_LINK_DIR / sandbox_name
-    if not link_dir.is_dir():
-        return []
-    results = []
-    for f in link_dir.iterdir():
-        if ".attached" not in f.name:
-            results.append({"name": f.name, "attached": _is_session_attached(sandbox_name, f.name)})
-    return results
+    return TMUX_SOCKET_DIR / f"{_validate_component(sandbox_name, 'sandbox name')}.sock"
 
 
-def list_sessions(container: str) -> list[dict]:
-    """List tmux sessions inside the container.
+def binding_path(sandbox_name: str, runtime_name: str) -> Path:
+    """Return the JSON binding path for one live runtime."""
+    from ccbox.config import SESSION_BINDING_DIR
 
-    Returns list of dicts with keys: name, attached, created.
-    """
-    r = lxd.exec_cmd(
-        container,
-        [
-            "tmux",
-            "list-sessions",
-            "-F",
-            "#{session_name}|#{session_attached}|#{session_created}",
-        ],
-        user=CONTAINER_USER,
-        capture=True,
-        check=False,
-    )
-    if r.returncode != 0:
-        return []
+    sandbox = _validate_component(sandbox_name, "sandbox name")
+    runtime = _validate_component(runtime_name, "runtime name")
+    return SESSION_BINDING_DIR / sandbox / f"{runtime}.json"
+
+
+def _parse_tmux_sessions(output: str) -> list[dict]:
     sessions = []
-    for line in r.stdout.strip().splitlines():
+    for line in output.strip().splitlines():
         parts = line.split("|", 2)
         if len(parts) == 3:
-            sessions.append(
-                {
-                    "name": parts[0],
-                    "attached": int(parts[1]) > 0,
-                    "created": parts[2],
-                }
-            )
+            try:
+                attached = int(parts[1]) > 0
+                created = int(parts[2])
+            except ValueError:
+                continue
+            sessions.append({"name": parts[0], "attached": attached, "created": created})
     return sessions
 
 
-def detached_sessions(container: str) -> list[dict]:
+def _query_sessions(sandbox_name: str) -> list[dict] | None:
+    """Query one socket, distinguishing an unreachable server from a live result."""
+    socket_path = tmux_socket_path(sandbox_name)
+    try:
+        result = subprocess.run(
+            ["tmux", "-S", str(socket_path), "list-sessions", "-F", _TMUX_FORMAT],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_tmux_sessions(result.stdout)
+
+
+def list_sessions(sandbox_name: str) -> list[dict]:
+    """List live runtimes directly through the sandbox's shared tmux socket."""
+    sessions = _query_sessions(sandbox_name)
+    if sessions is None:
+        return []
+    return sessions
+
+
+def list_all_sessions(
+    config: Any, *, max_workers: int = 8, container_states: dict[str, str] | None = None
+) -> list[dict]:
+    """List live runtimes across all configured, running sandboxes."""
+    states = container_states if container_states is not None else lxd.all_container_states()
+    running = [
+        (name, entry)
+        for name, entry in config.state.sandboxes.items()
+        if states.get(entry.container) == "Running"
+    ]
+    if not running:
+        return []
+
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(running))) as pool:
+        futures = {pool.submit(_query_sessions, name): (name, entry) for name, entry in running}
+        for future in as_completed(futures):
+            sandbox_name, entry = futures[future]
+            try:
+                sessions = future.result()
+            except Exception:
+                sessions = None
+            if sessions is None:
+                continue
+            prune_stale_bindings(sandbox_name, {session["name"] for session in sessions})
+            for session in sessions:
+                results.append({"sandbox": sandbox_name, "container": entry.container, **session})
+    return results
+
+
+def detached_sessions(sandbox_name: str) -> list[dict]:
     """Return only detached (unattached) sessions."""
-    return [s for s in list_sessions(container) if not s["attached"]]
+    return [s for s in list_sessions(sandbox_name) if not s["attached"]]
 
 
-def next_session_name(container: str) -> str:
+def next_session_name(sandbox_name: str) -> str:
     """Generate the next sequential session name (s-0, s-1, ...)."""
-    existing = list_sessions(container)
+    existing = list_sessions(sandbox_name)
     used = set()
     for s in existing:
         name = s["name"]
@@ -128,7 +166,7 @@ def create_session(
     env: dict[str, str] | None = None,
     unset_vars: list[str] | None = None,
     session_name: str | None = None,
-    sandbox_name: str | None = None,
+    sandbox_name: str,
 ) -> str:
     """Create a new tmux session inside the container.
 
@@ -146,7 +184,14 @@ def create_session(
     if cwd is not None:
         env["CCBOX_CWD"] = cwd
 
-    from ccbox.config import SESSION_LINK_DIR
+    from ccbox.config import SESSION_BINDING_DIR, TMUX_SOCKET_DIR
+
+    _validate_component(sandbox_name, "sandbox name")
+    TMUX_SOCKET_DIR.mkdir(parents=True, exist_ok=True)
+    socket_path = tmux_socket_path(sandbox_name)
+    if socket_path.exists() and _query_sessions(sandbox_name) is None:
+        # A stopped/removed container can leave a refused socket inode behind.
+        socket_path.unlink(missing_ok=True)
 
     # CCBOX_TMUX_SESSION is set inside the script (depends on resolved name)
     script = _build_session_script(
@@ -155,7 +200,8 @@ def create_session(
         env=env,
         unset_vars=unset_vars or [],
         command=command,
-        session_link_dir=str(SESSION_LINK_DIR) if sandbox_name else None,
+        socket_path=str(socket_path),
+        session_binding_dir=str(SESSION_BINDING_DIR),
         sandbox_name=sandbox_name,
     )
 
@@ -179,8 +225,9 @@ def _build_session_script(
     env: dict[str, str],
     unset_vars: list[str],
     command: str,
-    session_link_dir: str | None = None,
-    sandbox_name: str | None = None,
+    socket_path: str,
+    session_binding_dir: str,
+    sandbox_name: str,
 ) -> str:
     """Build a shell script that creates and configures a tmux session.
 
@@ -189,43 +236,37 @@ def _build_session_script(
     """
     lines: list[str] = []
 
-    # Resolve session name
+    tmux = f"tmux -S {shlex.quote(socket_path)}"
+
+    # Resolve session name.
     if session_name is not None:
+        _validate_component(session_name, "runtime name")
         lines.append(f"name={shlex.quote(session_name)}")
     else:
         lines.append(
-            'existing=$(tmux list-sessions -F "#{session_name}" 2>/dev/null || true)\n'
+            f'existing=$({tmux} list-sessions -F "#{{session_name}}" 2>/dev/null || true)\n'
             "n=0\n"
             'while printf "%s\\n" "$existing" | grep -qx "s-$n"; do n=$((n+1)); done\n'
             'name="s-$n"'
         )
 
     # Create detached session
-    new_cmd = f'tmux -f {TMUX_CONF} new-session -d -s "$name"'
+    new_cmd = f'{tmux} -f {TMUX_CONF} new-session -d -s "$name"'
     if cwd:
         new_cmd += f" -c {shlex.quote(cwd)}"
     lines.append(new_cmd)
 
-    # The link dir is on an rw mount (identity-mapped paths), so rm works
-    # directly from inside the container.
-    if session_link_dir and sandbox_name:
-        link_dir = f"{session_link_dir}/{sandbox_name}"
-        lines.append(f'_link="{link_dir}/$name"')
-        # Remove stale link from a previous session in this slot before Claude
-        # starts — avoids racing with the SessionStart hook that writes the new link.
-        lines.append('rm -f "$_link"')
-        # NB: no tmux session-closed hook here. The inline `ccbox _session-cleanup`
-        # below runs on every natural exit and is the sole link cleaner, so that an
-        # attached host can defer cleanup and read the link (for the resume hint)
-        # before it's removed. A session-closed hook would race that read away.
+    binding_dir = f"{session_binding_dir}/{sandbox_name}"
+    lines.append(f'_binding="{binding_dir}/$name.json"')
+    lines.append('rm -f "$_binding"')
 
     # Inject env vars via tmux set-environment (includes CCBOX_TMUX_SESSION)
     env["CCBOX_TMUX_SESSION"] = "$name"  # resolved by the shell
     for k, v in env.items():
         if v == "$name":
-            lines.append(f'tmux set-environment -t "$name" {shlex.quote(k)} "$name"')
+            lines.append(f'{tmux} set-environment -t "$name" {shlex.quote(k)} "$name"')
         else:
-            lines.append(f'tmux set-environment -t "$name" {shlex.quote(k)} {shlex.quote(v)}')
+            lines.append(f'{tmux} set-environment -t "$name" {shlex.quote(k)} {shlex.quote(v)}')
     del env["CCBOX_TMUX_SESSION"]  # don't mutate caller's dict permanently
 
     # Explicitly unset whitelisted vars not present on the host.
@@ -235,24 +276,20 @@ def _build_session_script(
     # so ccbox-profile.sh can do an explicit `unset` in the actual shell process.
     if unset_vars:
         lines.append(
-            f'tmux set-environment -t "$name" CCBOX_UNSET_VARS {shlex.quote(",".join(unset_vars))}'
+            f'{tmux} set-environment -t "$name" CCBOX_UNSET_VARS '
+            f"{shlex.quote(','.join(unset_vars))}"
         )
 
     # Respawn pane so the shell picks up the tmux session environment
-    respawn = 'tmux respawn-pane -k -t "$name"'
+    respawn = f'{tmux} respawn-pane -k -t "$name"'
     if cwd:
         respawn += f" -c {shlex.quote(cwd)}"
     lines.append(respawn)
 
-    # exec replaces bash — exiting the command kills the tmux session.
-    # When session_link_dir is set, run inline cleanup on exit (before the pane
-    # closes) so it fires reliably even when this is the last session and the
-    # tmux server shuts down. It also lets an attached host defer link cleanup.
-    if session_link_dir and sandbox_name:
-        send_cmd = f"{command}; ccbox _session-cleanup; exit"
-    else:
-        send_cmd = f"exec {command}"
-    lines.append(f'tmux send-keys -t "$name" {shlex.quote(send_cmd)} Enter')
+    # exec replaces bash; remain-on-exit is disabled, so the session disappears
+    # when the foreground command exits.
+    send_cmd = f"exec {command}"
+    lines.append(f'{tmux} send-keys -t "$name" {shlex.quote(send_cmd)} Enter')
 
     # Output session name for the caller to parse
     lines.append('printf "%s" "$name"')
@@ -260,146 +297,166 @@ def _build_session_script(
     return "\n".join(lines)
 
 
-def attach_session(container: str, session_name: str, *, sandbox_name: str | None = None) -> None:
-    """Attach to an existing tmux session (interactive, inherited stdio).
+def attach_session(container: str, session_name: str, *, sandbox_name: str) -> bool:
+    """Attach interactively. Return False when the runtime vanished before attach."""
+    result = lxd.exec_interactive(
+        container,
+        [
+            "tmux",
+            "-S",
+            str(tmux_socket_path(sandbox_name)),
+            "-f",
+            TMUX_CONF,
+            "attach-session",
+            "-t",
+            session_name,
+        ],
+        user=CONTAINER_USER,
+        # lxc exec gives the client no HOME; ncurses needs it for ~/.terminfo.
+        env={"HOME": os.path.expanduser("~")},
+    )
+    return result.returncode == 0
 
-    If sandbox_name is provided, creates a per-PID .attached.{pid} marker while
-    attached and removes it on detach/exit so the cache reflects live state.
-    Multiple concurrent attaches each hold their own marker.
-    """
-    if sandbox_name is not None:
-        marker = _attached_marker(sandbox_name, session_name)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-    try:
-        lxd.exec_interactive(
-            container,
-            ["tmux", "-f", TMUX_CONF, "attach-session", "-t", session_name],
-            user=CONTAINER_USER,
+
+def kill_session(container: str, name: str, *, sandbox_name: str) -> None:
+    lxd.exec_cmd(
+        container,
+        ["tmux", "-S", str(tmux_socket_path(sandbox_name)), "kill-session", "-t", name],
+        user=CONTAINER_USER,
+        check=False,
+    )
+    clean_session_binding(sandbox_name, name)
+    if not _query_sessions(sandbox_name):
+        socket_path = tmux_socket_path(sandbox_name)
+        subprocess.run(
+            ["tmux", "-S", str(socket_path), "kill-server"],
+            capture_output=True,
+            check=False,
         )
+        socket_path.unlink(missing_ok=True)
+
+
+def kill_all_sessions(container: str, *, sandbox_name: str) -> None:
+    lxd.exec_cmd(
+        container,
+        ["tmux", "-S", str(tmux_socket_path(sandbox_name)), "kill-server"],
+        user=CONTAINER_USER,
+        check=False,
+    )
+    clean_session_runtime_state(sandbox_name)
+
+
+def write_session_binding(
+    sandbox_name: str, runtime_name: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate and atomically write a SessionStart runtime binding."""
+    required = ("session_id", "transcript_path", "cwd")
+    for field in required:
+        if not isinstance(payload.get(field), str) or not payload[field]:
+            raise ValueError(f"Binding field {field!r} must be a non-empty string")
+    source = payload.get("source")
+    if source is not None and not isinstance(source, str):
+        raise ValueError("Binding field 'source' must be a string when present")
+
+    record = {
+        "schema": 1,
+        "sandbox": _validate_component(sandbox_name, "sandbox name"),
+        "runtime": _validate_component(runtime_name, "runtime name"),
+        "session_id": payload["session_id"],
+        "transcript_path": payload["transcript_path"],
+        "cwd": payload["cwd"],
+        "updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    if source is not None:
+        record["source"] = source
+
+    destination = binding_path(sandbox_name, runtime_name)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=destination.parent, prefix=f".{runtime_name}.", delete=False
+        ) as temp:
+            temp_name = temp.name
+            json.dump(record, temp, sort_keys=True)
+            temp.write("\n")
+            temp.flush()
+            os.fsync(temp.fileno())
+        os.replace(temp_name, destination)
     finally:
-        if sandbox_name is not None:
-            _attached_marker(sandbox_name, session_name).unlink(missing_ok=True)
+        if temp_name is not None:
+            Path(temp_name).unlink(missing_ok=True)
+    return record
 
 
-def kill_session(container: str, name: str, *, sandbox_name: str | None = None) -> None:
-    lxd.exec_cmd(
-        container,
-        ["tmux", "kill-session", "-t", name],
-        user=CONTAINER_USER,
-        check=False,
-    )
-    if sandbox_name is not None:
-        _clean_session_link(sandbox_name, name)
+def read_session_binding(sandbox_name: str, runtime_name: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(binding_path(sandbox_name, runtime_name).read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("schema") != 1:
+        return None
+    if value.get("sandbox") != sandbox_name or value.get("runtime") != runtime_name:
+        return None
+    if not isinstance(value.get("session_id"), str) or not isinstance(
+        value.get("transcript_path"), str
+    ):
+        return None
+    return value
 
 
-def kill_all_sessions(container: str, *, sandbox_name: str | None = None) -> None:
-    lxd.exec_cmd(
-        container,
-        ["tmux", "kill-server"],
-        user=CONTAINER_USER,
-        check=False,
-    )
-    if sandbox_name is not None:
-        _clean_session_links(sandbox_name)
+def clean_session_binding(sandbox_name: str, runtime_name: str) -> None:
+    path = binding_path(sandbox_name, runtime_name)
+    path.unlink(missing_ok=True)
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
 
 
-def clean_session_links(sandbox_name: str) -> None:
-    """Remove all session-link files for a sandbox (e.g. on stop/remove)."""
-    _clean_session_links(sandbox_name)
+def prune_stale_bindings(sandbox_name: str, live_runtime_names: set[str]) -> None:
+    from ccbox.config import SESSION_BINDING_DIR
+
+    sandbox_dir = SESSION_BINDING_DIR / _validate_component(sandbox_name, "sandbox name")
+    if not sandbox_dir.is_dir():
+        return
+    for path in sandbox_dir.glob("*.json"):
+        if path.stem not in live_runtime_names:
+            path.unlink(missing_ok=True)
+    try:
+        sandbox_dir.rmdir()
+    except OSError:
+        pass
 
 
-def clean_session_link(sandbox_name: str, session_name: str) -> None:
-    """Remove a single session-link file and its .attached marker."""
-    _clean_session_link(sandbox_name, session_name)
+def clean_session_runtime_state(sandbox_name: str) -> None:
+    """Remove a sandbox's shared socket and all binding records."""
+    from ccbox.config import SESSION_BINDING_DIR
 
-
-def _attached_marker(sandbox_name: str, session_name: str):
-    """Path to the per-PID .attached marker for this attach instance.
-
-    Each attaching process creates its own marker; 'attached' means any exist.
-    """
-    from ccbox.config import SESSION_LINK_DIR
-
-    return SESSION_LINK_DIR / sandbox_name / f"{session_name}.attached.{os.getpid()}"
-
-
-def _is_session_attached(sandbox_name: str, session_name: str) -> bool:
-    """Check if any process currently has this session attached."""
-    from ccbox.config import SESSION_LINK_DIR
-
-    link_dir = SESSION_LINK_DIR / sandbox_name
-    if not link_dir.is_dir():
-        return False
-    prefix = f"{session_name}.attached."
-    return any(f.name.startswith(prefix) for f in link_dir.iterdir())
-
-
-def _clean_session_link(sandbox_name: str, session_name: str) -> None:
-    """Remove a single session-link file and all its .attached.{pid} markers."""
-    import shutil
-
-    from ccbox.config import SESSION_LINK_DIR
-
-    (SESSION_LINK_DIR / sandbox_name / session_name).unlink(missing_ok=True)
-    # Remove all .attached.{pid} marker files for this session
-    sandbox_dir = SESSION_LINK_DIR / sandbox_name
-    if sandbox_dir.is_dir():
-        prefix = f"{session_name}.attached."
-        for marker in sandbox_dir.iterdir():
-            if marker.name.startswith(prefix):
-                marker.unlink(missing_ok=True)
-    # Remove sandbox dir if now empty
-    if sandbox_dir.is_dir() and not any(sandbox_dir.iterdir()):
-        shutil.rmtree(sandbox_dir, ignore_errors=True)
-
-
-def _clean_session_links(sandbox_name: str) -> None:
-    """Remove all session-link files for a sandbox."""
-    import shutil
-
-    from ccbox.config import SESSION_LINK_DIR
-
-    sandbox_dir = SESSION_LINK_DIR / sandbox_name
-    if sandbox_dir.is_dir():
-        shutil.rmtree(sandbox_dir, ignore_errors=True)
+    sandbox = _validate_component(sandbox_name, "sandbox name")
+    tmux_socket_path(sandbox).unlink(missing_ok=True)
+    shutil.rmtree(SESSION_BINDING_DIR / sandbox, ignore_errors=True)
 
 
 def build_claude_command(extra_args: list[str] | None = None) -> str:
     """Build the claude invocation command string."""
-    parts = ["claude", "--allow-dangerously-skip-permissions"]
+    parts = ["claude", "--dangerously-skip-permissions"]
     if extra_args:
         # Deduplicate the flag if user passed it
         for arg in extra_args:
-            if arg == "--allow-dangerously-skip-permissions":
+            if arg == "--dangerously-skip-permissions":
                 continue
             parts.append(arg)
     return shlex.join(parts)
 
 
-def session_exists(container: str, name: str) -> bool:
+def session_exists(sandbox_name: str, name: str) -> bool:
     """True if a tmux session with exactly *name* is still alive in the container.
 
     Used after an attach returns to tell a natural exit (session gone) apart from
     a Ctrl+Q detach (session still present).
     """
-    return any(s["name"] == name for s in list_sessions(container))
-
-
-def read_session_link(sandbox_name: str, session_name: str) -> str | None:
-    """Return the transcript path recorded for a tmux session, or None.
-
-    The SessionStart hook writes the transcript path into the session-link file
-    (see ``cmd_session_link``); this reads it back so the exact session that ran
-    in a pane can be identified without guessing.
-    """
-    from ccbox.config import SESSION_LINK_DIR
-
-    try:
-        text = (SESSION_LINK_DIR / sandbox_name / session_name).read_text().strip()
-    except OSError:
-        return None
-    return text or None
+    return any(s["name"] == name for s in list_sessions(sandbox_name))
 
 
 def _find_codex() -> str | None:

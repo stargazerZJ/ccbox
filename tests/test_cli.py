@@ -21,6 +21,11 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.command, "shell")
         self.assertEqual(args.shell_command, ["echo", "hello"])
 
+    def test_internal_session_bind_command_is_registered(self) -> None:
+        args = build_parser().parse_args(["_session-bind"])
+
+        self.assertEqual(args.command, "_session-bind")
+
 
 class FakeConfig:
     def __init__(self) -> None:

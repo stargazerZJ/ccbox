@@ -44,27 +44,28 @@ Tests live in `tests/` (stdlib `unittest`, no extra deps). `tests/test_transcrip
 - `cli.py` — argparse-based subcommand routing; universal `-s/--sandbox` flag on every subcommand
 - `config.py` — State file (`~/.config/ccbox/state.json`), dataclasses: `MountEntry`, `SandboxEntry`, `State`, `Config`
 - `sandbox.py` — Container lifecycle (create/start/stop/remove), auto-mount sync, sandbox-to-CWD resolution
-- `session.py` — Tmux session lifecycle, env var injection (`tmux set-environment`), command builders for Claude/Codex
+- `session.py` — Tmux runtime lifecycle via per-sandbox shared sockets, Claude bindings, env injection, and command builders
 - `lxd.py` — Thin wrappers around `lxc` CLI commands (exec, config, publish, etc.)
 - `mount.py` — Bind mount management with inode tracking to detect replaced directories
 - `picker.py` — Textual TUI for interactive sandbox/session selection (default when no args)
 - `port.py` — Port forwarding via LXD proxy devices (TCP/UDP)
 - `uv_server.py` — Host-side Unix socket server that performs hardlinks on behalf of the patched uv inside the container
-- `transcript.py` — Reads Claude/Codex session transcripts (`.jsonl`) for session info display
+- `transcript.py` — Reads bounded Claude transcript tails for automatic titles and legacy transcript metadata helpers
 
 **Key data flow:**
 1. CLI resolves sandbox for CWD via `resolve_sandbox()` (walks parent dirs to find a matching mount)
 2. `ensure_running()` starts the container if stopped
-3. `create_session()` spawns a tmux session inside the container via `lxc exec`
+3. `create_session()` spawns a tmux runtime through `~/.cache/ccbox/run/tmux/<sandbox>.sock`
 4. Environment variables from the host whitelist are injected via `tmux set-environment`
-5. The uv hardlink server runs on the host, listening on a Unix socket in `~/.cache/ccbox/run/`
+5. Claude's `SessionStart` hook calls `ccbox _session-bind` to atomically record the conversation UUID and transcript
+6. The picker discovers live runtimes from tmux and reads their latest matching `ai-title` transcript record
 
 **State:** All persistent state lives in `~/.config/ccbox/state.json` — sandbox definitions, mount entries, env whitelist, storage pool name, and auto-mount config.
 
 ## Key conventions
 
 - Container names are prefixed `ccbox-` (e.g., sandbox "mybox" → container "ccbox-mybox")
-- Sessions are named `sandbox/N` (e.g., `mybox/0`); the `attach` and `kill` commands accept this format
+- Runtime IDs are compact tmux names (`s-0`, `s-1`, ...); commands also accept `sandbox/s-0`
 - `ccbox shell` opens an interactive login shell; `ccbox shell <cmd...>` runs a command ssh-style (same login env + CWD, exits with the command's code). The command path sources `profile.sh` explicitly since `.bashrc` early-returns for non-interactive shells
 - Stopped sandboxes auto-start on any command that calls `ensure_running()`
 - `lxc publish --reuse` (not `--force`) to replace existing image aliases

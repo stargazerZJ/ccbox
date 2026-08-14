@@ -7,7 +7,7 @@ import os
 import sys
 
 from ccbox import lxd
-from ccbox.config import SESSION_LINK_DIR, Config, SandboxEntry
+from ccbox.config import Config, SandboxEntry
 from ccbox.mount import (
     add_auto_mounts,
     add_mount,
@@ -17,7 +17,7 @@ from ccbox.mount import (
     fix_mount_parents,
     prune_stale_mounts,
 )
-from ccbox.session import list_sessions
+from ccbox.session import list_all_sessions, list_sessions, tmux_socket_path
 from ccbox.uv_server import ensure_server_running
 
 CONTAINER_PREFIX = "ccbox-"
@@ -130,6 +130,7 @@ def create_sandbox(
     Returns:
         Container name
     """
+    tmux_socket_path(name)  # validates names used as socket/binding path components
     cname = container_name(name)
 
     if config.get_sandbox(name) is not None:
@@ -215,10 +216,10 @@ def stop_sandbox(config: Config, name: str) -> None:
     state = lxd.container_state(entry.container)
     if state == "Running":
         lxd.stop(entry.container)
-    # All tmux sessions die on stop — clean up links
-    from ccbox.session import clean_session_links
+    # All tmux runtimes die on stop — clean up socket and bindings.
+    from ccbox.session import clean_session_runtime_state
 
-    clean_session_links(name)
+    clean_session_runtime_state(name)
 
 
 def remove_sandbox(config: Config, name: str) -> None:
@@ -229,10 +230,9 @@ def remove_sandbox(config: Config, name: str) -> None:
     if lxd.container_exists(entry.container):
         lxd.delete(entry.container, force=True)
     config.remove_sandbox(name)
-    # Clean up session links
-    from ccbox.session import clean_session_links
+    from ccbox.session import clean_session_runtime_state
 
-    clean_session_links(name)
+    clean_session_runtime_state(name)
 
 
 def list_sandboxes(config: Config) -> list[dict]:
@@ -243,6 +243,10 @@ def list_sandboxes(config: Config) -> list[dict]:
     # Batch-fetch all container states in one API call
     container_states = lxd.all_container_states()
 
+    live_counts: dict[str, int] = {}
+    for runtime in list_all_sessions(config, container_states=container_states):
+        live_counts[runtime["sandbox"]] = live_counts.get(runtime["sandbox"], 0) + 1
+
     result = []
     stale = []
     for name, entry in config.state.sandboxes.items():
@@ -250,12 +254,7 @@ def list_sandboxes(config: Config) -> list[dict]:
         if state == "NotFound":
             stale.append(name)
             continue
-        sessions = 0
-        if state == "Running":
-            # Use session-link files as fast session count (avoids lxc exec)
-            link_dir = SESSION_LINK_DIR / name
-            if link_dir.is_dir():
-                sessions = sum(1 for _ in link_dir.iterdir())
+        sessions = live_counts.get(name, 0) if state == "Running" else 0
         result.append(
             {
                 "name": name,
@@ -283,7 +282,7 @@ def sandbox_status(config: Config, name: str) -> dict:
     state = lxd.container_state(entry.container)
     sessions = []
     if state == "Running":
-        sessions = list_sessions(entry.container)
+        sessions = list_sessions(name)
 
     return {
         "name": name,
