@@ -57,7 +57,7 @@ Tests live in `tests/` (stdlib `unittest`, no extra deps). `tests/test_transcrip
 2. `ensure_running()` starts the container if stopped
 3. `create_session()` spawns a tmux runtime through `~/.cache/ccbox/run/tmux/<sandbox>.sock`
 4. Environment variables from the host whitelist are injected via `tmux set-environment`
-5. Claude's `SessionStart` hook calls `ccbox _session-bind` to atomically record the conversation UUID and transcript
+5. Claude's `SessionStart` hook calls `ccbox _session-bind` to atomically record the conversation UUID and transcript. Only the runtime pane's top-level claude may bind: hooks from other panes (tmux-backed teammates), from a claude nested under it (`claude -p` in a Bash tool), or `startup` takeovers while the owner process is alive (in-process teammates) are ignored. The original pane is recorded as `CCBOX_TMUX_PANE`
 6. The picker discovers live runtimes from tmux and reads their latest matching `ai-title` transcript record
 
 **State:** All persistent state lives in `~/.config/ccbox/state.json` — sandbox definitions, mount entries, env whitelist, storage pool name, and auto-mount config.

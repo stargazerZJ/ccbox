@@ -35,6 +35,7 @@ from ccbox.sandbox import (
 )
 from ccbox.session import (
     attach_session,
+    bind_session_from_hook,
     build_claude_command,
     build_codex_command,
     clean_session_binding,
@@ -48,7 +49,6 @@ from ccbox.session import (
     read_session_binding,
     sandbox_env,
     session_exists,
-    write_session_binding,
 )
 from ccbox.transcript import (
     read_latest_ai_title,
@@ -149,7 +149,7 @@ def cmd_session_bind(config: Config, args: argparse.Namespace) -> None:
         return
 
     try:
-        write_session_binding(sandbox, tmux_session, hook_input)
+        bind_session_from_hook(sandbox, tmux_session, hook_input)
     except (OSError, ValueError):
         return
 

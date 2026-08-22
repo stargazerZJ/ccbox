@@ -260,14 +260,21 @@ def _build_session_script(
     lines.append(f'_binding="{binding_dir}/$name.json"')
     lines.append('rm -f "$_binding"')
 
+    # Remember the runtime's original pane: Claude's SessionStart hook compares it
+    # against its own TMUX_PANE so tmux-backed teammates (split panes) never steal
+    # the runtime binding. respawn-pane keeps the pane id.
+    lines.append(f'pane=$({tmux} display-message -p -t "$name" "#{{pane_id}}")')
+
     # Inject env vars via tmux set-environment (includes CCBOX_TMUX_SESSION)
     env["CCBOX_TMUX_SESSION"] = "$name"  # resolved by the shell
+    env["CCBOX_TMUX_PANE"] = "$pane"
     for k, v in env.items():
-        if v == "$name":
-            lines.append(f'{tmux} set-environment -t "$name" {shlex.quote(k)} "$name"')
+        if v in ("$name", "$pane"):
+            lines.append(f'{tmux} set-environment -t "$name" {shlex.quote(k)} "{v}"')
         else:
             lines.append(f'{tmux} set-environment -t "$name" {shlex.quote(k)} {shlex.quote(v)}')
     del env["CCBOX_TMUX_SESSION"]  # don't mutate caller's dict permanently
+    del env["CCBOX_TMUX_PANE"]
 
     # Explicitly unset whitelisted vars not present on the host.
     # We can't rely on `tmux set-environment -u` because the tmux server's own
@@ -346,8 +353,210 @@ def kill_all_sessions(container: str, *, sandbox_name: str) -> None:
     clean_session_runtime_state(sandbox_name)
 
 
+# --- SessionStart hook ownership -------------------------------------------
+#
+# Every Claude process started inside a runtime fires the SessionStart hook:
+# the conversation the user is looking at, tmux-backed teammates in split
+# panes, in-process teammates, nested ``claude -p`` runs from a Bash tool, ...
+# Only the pane's top-level process may (re)bind the runtime.
+
+
+def _tmux_socket_from_env(env: dict[str, str]) -> str | None:
+    """Socket path from tmux's ``TMUX=<socket>,<pid>,<index>`` variable."""
+    value = env.get("TMUX", "")
+    socket_path = value.split(",", 1)[0] if value else ""
+    return socket_path or None
+
+
+def _tmux_query(socket_path: str, args: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            ["tmux", "-S", socket_path, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def resolve_runtime_pane(sandbox_name: str, runtime_name: str, env: dict[str, str]) -> str | None:
+    """Return the runtime's original pane id (``%N``), or None when unknown.
+
+    Prefers ``CCBOX_TMUX_PANE`` recorded at creation; older runtimes fall back
+    to the lowest pane id in the session, which is the pane the runtime was
+    created with (splits only ever allocate higher ids).
+    """
+    recorded = env.get("CCBOX_TMUX_PANE", "")
+    if recorded.startswith("%"):
+        return recorded
+    socket_path = _tmux_socket_from_env(env) or str(tmux_socket_path(sandbox_name))
+    output = _tmux_query(
+        socket_path, ["list-panes", "-s", "-t", f"={runtime_name}", "-F", "#{pane_id}"]
+    )
+    if not output:
+        return None
+    ids = []
+    for line in output.split():
+        if line.startswith("%") and line[1:].isdigit():
+            ids.append(int(line[1:]))
+    return f"%{min(ids)}" if ids else None
+
+
+def resolve_pane_pid(sandbox_name: str, pane_id: str, env: dict[str, str]) -> int | None:
+    """PID of the process running in *pane_id* (the exec'd claude), or None."""
+    socket_path = _tmux_socket_from_env(env) or str(tmux_socket_path(sandbox_name))
+    output = _tmux_query(socket_path, ["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
+    if output is None:
+        return None
+    value = output.strip()
+    return int(value) if value.isdigit() else None
+
+
+def _proc_ppid(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as stat:
+            data = stat.read()
+    except OSError:
+        return None
+    # comm may contain spaces/parens; fields after the last ')' are fixed.
+    rest = data.rsplit(")", 1)[-1].split()
+    if len(rest) < 2 or not rest[1].isdigit():
+        return None
+    return int(rest[1])
+
+
+def _proc_exe(pid: int) -> str | None:
+    try:
+        return os.path.realpath(os.readlink(f"/proc/{pid}/exe"))
+    except OSError:
+        return None
+
+
+def _proc_cmdline(pid: int) -> list[str] | None:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as cmdline:
+            data = cmdline.read()
+    except OSError:
+        return None
+    return [part.decode("utf-8", "replace") for part in data.split(b"\0") if part]
+
+
+def _is_claude_process(pid: int) -> bool:
+    exe = _proc_exe(pid) or ""
+    if os.path.basename(exe) == "claude" or "/claude/versions/" in exe:
+        return True
+    argv = _proc_cmdline(pid) or []
+    if argv and os.path.basename(argv[0]) == "claude":
+        return True
+    # npm-style install: node .../@anthropic-ai/claude-code/cli.js
+    return any(arg.endswith("/cli.js") and "claude" in arg for arg in argv[1:3])
+
+
+def nested_claude_between(start_pid: int, pane_pid: int | None) -> bool:
+    """True if the hook at *start_pid* runs under a claude nested in the pane's claude.
+
+    Walks ancestors from *start_pid* up to and including *pane_pid* (or init
+    when the pane pid is unknown) and counts claude-looking processes. The
+    pane's own claude accounts for one; a second one means the hook came from
+    a nested run such as ``claude -p`` inside a Bash tool call.
+    """
+    claude_seen = 0
+    pid: int | None = start_pid
+    for _ in range(128):
+        if pid is None or pid <= 1:
+            break
+        if _is_claude_process(pid):
+            claude_seen += 1
+            if claude_seen >= 2:
+                return True
+        if pane_pid is not None and pid == pane_pid:
+            break
+        pid = _proc_ppid(pid)
+    return False
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def should_accept_binding(
+    payload: dict[str, Any],
+    existing: dict[str, Any] | None,
+    *,
+    runtime_pane: str | None,
+    hook_pane: str | None,
+    nested_claude: bool,
+    owner_alive: Any = pid_alive,
+) -> bool:
+    """Decide whether a SessionStart hook may (re)bind its runtime.
+
+    Rejects hooks from other panes (tmux-backed teammates), hooks fired by a
+    claude nested under the pane's claude (``claude -p`` from a Bash tool), and
+    ``startup`` takeovers by a different session while the owning process is
+    still alive (in-process teammates). Same-process ``clear``/``resume``/
+    ``compact`` transitions always win.
+    """
+    if runtime_pane and hook_pane and runtime_pane != hook_pane:
+        return False
+    if nested_claude:
+        return False
+    if (
+        existing is not None
+        and existing.get("session_id") != payload.get("session_id")
+        and payload.get("source") == "startup"
+    ):
+        owner_pid = existing.get("owner_pid")
+        if isinstance(owner_pid, int) and owner_alive(owner_pid):
+            return False
+    return True
+
+
+def bind_session_from_hook(
+    sandbox_name: str,
+    runtime_name: str,
+    payload: dict[str, Any],
+    env: dict[str, str] | None = None,
+    *,
+    hook_pid: int | None = None,
+) -> dict[str, Any] | None:
+    """Apply the ownership rules and write the binding. Returns the record or None."""
+    env = dict(os.environ) if env is None else env
+    hook_pid = os.getppid() if hook_pid is None else hook_pid
+    runtime_pane = resolve_runtime_pane(sandbox_name, runtime_name, env)
+    pane_pid = (
+        resolve_pane_pid(sandbox_name, runtime_pane, env) if runtime_pane is not None else None
+    )
+    accepted = should_accept_binding(
+        payload,
+        read_session_binding(sandbox_name, runtime_name),
+        runtime_pane=runtime_pane,
+        hook_pane=env.get("TMUX_PANE") or None,
+        nested_claude=nested_claude_between(hook_pid, pane_pid),
+    )
+    if not accepted:
+        return None
+    return write_session_binding(sandbox_name, runtime_name, payload, owner_pid=pane_pid)
+
+
 def write_session_binding(
-    sandbox_name: str, runtime_name: str, payload: dict[str, Any]
+    sandbox_name: str,
+    runtime_name: str,
+    payload: dict[str, Any],
+    *,
+    owner_pid: int | None = None,
 ) -> dict[str, Any]:
     """Validate and atomically write a SessionStart runtime binding."""
     required = ("session_id", "transcript_path", "cwd")
@@ -369,6 +578,8 @@ def write_session_binding(
     }
     if source is not None:
         record["source"] = source
+    if owner_pid is not None:
+        record["owner_pid"] = int(owner_pid)
 
     destination = binding_path(sandbox_name, runtime_name)
     destination.parent.mkdir(parents=True, exist_ok=True)
